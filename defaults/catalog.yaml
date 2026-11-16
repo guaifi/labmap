@@ -1,0 +1,132 @@
+# LABMAP DATABASE · catalog: port types and device templates
+# DO NOT EDIT BY HAND: change it from the web page. This file is the stored copy.
+#
+# portTypes: the only port types that can be chosen.
+#   layer   net, power, serial, jtag, usb, video, bus, rf, radio, discrete, other
+#   name    recommended port name; {n} = number, {a} = letter
+#   first   first number for {n} (default 1)
+#   dir     for power: in (inlet) or out (outlet)
+#   net     true = takes VLAN, IP, MAC and services
+#   virtual true = logical interface, no cable
+#   pass    true = relay contact: outlet N depends only on inlet N
+#   alias   other spellings; they are converted to the key
+# templates: device templates for the wizard. ports: one line per port, "name type".
+#   meta    optional, data each port inherits: { vlan, services, notes }
+portTypes:
+  iface: { label: "Logical interface, no cable", layer: net, name: mgmt, net: true, virtual: true, alias: [virtual, logical] }
+  rj45: { label: Ethernet RJ45, layer: net, name: "eth{n}", first: 0, net: true, alias: [eth, ethernet, net, lan, gbe] }
+  sfp: { label: SFP or SFP+ (fibre or DAC), layer: net, name: "sfp{n}", first: 0, net: true, alias: [sfp+, fibre, fiber, qsfp] }
+  ac-in: { label: Mains inlet (AC), layer: power, name: ac-in, dir: in, alias: [power-in, mains, iec] }
+  ac-out: { label: Mains outlet (AC), layer: power, name: "out{n}", dir: out, alias: [power-out, outlet, socket] }
+  dc-in: { label: DC inlet, layer: power, name: dc-in, dir: in, alias: [vin] }
+  dc-out: { label: DC output, layer: power, name: "ch{n}", dir: out, alias: [vout] }
+  relay-in: { label: "Relay contact, inlet", layer: power, name: "in{n}", dir: in, pass: true, alias: [] }
+  relay-out: { label: "Relay contact, outlet", layer: power, name: "out{n}", dir: out, pass: true, alias: [] }
+  rs232: { label: RS-232, layer: serial, name: "rs232-{n}", alias: [serial, rs-232, com, db9] }
+  rs422: { label: RS-422, layer: serial, name: "rs422-{n}", alias: [rs-422] }
+  rs485: { label: RS-485, layer: serial, name: "rs485-{n}", alias: [rs-485] }
+  uart: { label: UART TTL (3V3 or 5V), layer: serial, name: "uart{n}", first: 0, alias: [ttl, console] }
+  jtag: { label: JTAG or SWD, layer: jtag, name: jtag, alias: [swd, xvc] }
+  usb: { label: USB, layer: usb, name: "usb{n}", alias: [usb-a, usb-b, usb-c, usb-otg, usb-host, usb-dev] }
+  displayport: { label: DisplayPort, layer: video, name: "dp{n}", alias: [dp] }
+  dvi: { label: DVI, layer: video, name: "dvi{n}", alias: [] }
+  hdmi: { label: HDMI, layer: video, name: "hdmi{n}", alias: [] }
+  pal: { label: Composite video (PAL), layer: video, name: "pal{n}", alias: [cvbs, composite, ntsc] }
+  sdi: { label: SDI, layer: video, name: "sdi{n}", alias: ["3g-sdi", hd-sdi] }
+  vga: { label: VGA, layer: video, name: vga, alias: [] }
+  can: { label: CAN or CAN FD, layer: bus, name: "can{n}", first: 0, alias: [canfd, can-fd] }
+  rf: { label: "RF coaxial (SMA, N, BNC)", layer: rf, name: "rf{n}", alias: [sma, bnc, coax, antenna] }
+  ble: { label: Bluetooth LE, layer: radio, name: ble, alias: [bluetooth] }
+  thread: { label: Thread, layer: radio, name: thread, alias: [] }
+  wifi: { label: Wi-Fi, layer: radio, name: wifi, net: true, alias: [wlan, wi-fi] }
+  zigbee: { label: Zigbee, layer: radio, name: zigbee, alias: ["802.15.4"] }
+  discrete: { label: "Discrete signal, GPIO or trigger", layer: discrete, name: "disc{n}", alias: [gpio, dio, trigger, trig, pps] }
+  debug: { label: Debug connector (multi-signal), layer: other, name: debug, alias: [] }
+  other: { label: Other, layer: other, name: "p{n}", alias: [] }
+templates:
+  board:
+    label: Development board
+    types: [board]
+    pattern: "board-{nn}"
+    power: wall
+    ports:
+      - eth0 rj45
+      - uart0 uart
+      - usb1 usb
+      - dc-in dc-in
+  pc:
+    label: PC
+    types: [pc]
+    pattern: "pc-{nn}"
+    power: wall
+    ports:
+      - eth0 rj45
+      - wifi wifi
+      - "usb[1-4] usb"
+      - hdmi1 hdmi
+      - ac-in ac-in
+    meta:
+      eth0: { services: ssh 22 }
+  power-strip:
+    label: "Power strip, 6 outlets"
+    types: [strip]
+    pattern: "strip-{n}"
+    power: wall
+    ports:
+      - ac-in ac-in
+      - "out[1-6] ac-out"
+  router:
+    label: Router with Wi-Fi
+    types: [router]
+    pattern: "router-{n}"
+    power: wall
+    admin: "http://{ip}"
+    ports:
+      - wan rj45
+      - "lan[1-4] rj45"
+      - wifi wifi
+      - dc-in dc-in
+  switch-8:
+    label: "Network switch, 8 ports"
+    types: [switch]
+    pattern: "sw-{n}"
+    power: wall
+    admin: "http://{ip}"
+    ports:
+      - "p[1-8] rj45"
+      - mgmt iface
+      - ac-in ac-in
+  ups:
+    label: "UPS, 4 outlets"
+    types: [ups]
+    pattern: "ups-{n}"
+    power: wall
+    admin: "http://{ip}"
+    ports:
+      - ac-in ac-in
+      - "out[1-4] ac-out"
+      - eth0 rj45
+  usb-hub-4:
+    label: "USB hub, 4 ports"
+    types: [hub]
+    pattern: "usbhub-{nn}"
+    power: none
+    ports:
+      - up usb
+      - "p[1-4] usb"
+  usb-serial:
+    label: USB to serial adapter
+    types: [adapter]
+    pattern: "usbserial-{nn}"
+    power: none
+    notes: "Linux: minicom -b 115200 -D /dev/ttyUSB0"
+    ports:
+      - usb1 usb
+      - uart0 uart
+  wall-socket:
+    label: Wall socket
+    types: [wall]
+    pattern: "wall-{n}"
+    power: none
+    ports:
+      - "out[1-2] ac-out"

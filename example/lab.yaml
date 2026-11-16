@@ -1,0 +1,131 @@
+# LABMAP DATABASE · lab: devices, cables, VLANs, IPs and change log
+# DO NOT EDIT BY HAND: change it from the web page. This file is the stored copy.
+# Labmap 0.4.0 · rev 1
+rev: 1
+vlans:
+  LAN: { id: 1, subnet: "192.168.1.0/24", gateway: "192.168.1.1", dns: "192.168.1.1", scope: local, notes: The only network here. }
+devices:
+  board-01:
+    types: [board]
+    project: DEMO
+    owner: jsmith
+    location: Desk
+    notes: Board under development
+    admin: "http://{ip}"
+    expectedPower: wall
+    ports:
+      - { name: eth0, kind: rj45, ip: "192.168.1.20", mac: "02:00:00:00:00:05", vlan: LAN, services: ssh 22 }
+      - { name: uart0, kind: uart }
+      - { name: usb1, kind: usb }
+      - { name: dc-in, kind: dc-in }
+  pc-01:
+    types: [pc]
+    owner: jsmith
+    location: Desk
+    notes: "OS: Linux"
+    expectedPower: wall
+    ports:
+      - { name: eth0, kind: rj45, ip: "192.168.1.10", mac: "02:00:00:00:00:03", vlan: LAN, services: ssh 22 }
+      - { name: wifi, kind: wifi }
+      - { name: usb1, kind: usb }
+      - { name: usb2, kind: usb }
+      - { name: usb3, kind: usb }
+      - { name: usb4, kind: usb }
+      - { name: hdmi1, kind: hdmi }
+      - { name: ac-in, kind: ac-in }
+  pc-02:
+    types: [pc]
+    owner: mjones
+    location: Sofa
+    notes: "Laptop, Wi-Fi only"
+    expectedPower: wall
+    ports:
+      - { name: eth0, kind: rj45 }
+      - { name: wifi, kind: wifi, ip: "192.168.1.11", mac: "02:00:00:00:00:04", vlan: LAN }
+      - { name: usb1, kind: usb }
+      - { name: usb2, kind: usb }
+      - { name: usb3, kind: usb }
+      - { name: usb4, kind: usb }
+      - { name: hdmi1, kind: hdmi }
+      - { name: ac-in, kind: ac-in }
+  router-1:
+    types: [router]
+    location: Shelf
+    notes: "Internet router, DHCP server"
+    admin: "http://{ip}"
+    expectedPower: wall
+    ports:
+      - { name: wan, kind: rj45 }
+      - { name: lan1, kind: rj45, ip: "192.168.1.1", mac: "02:00:00:00:00:01", vlan: LAN, services: "http, dns, dhcp" }
+      - { name: lan2, kind: rj45 }
+      - { name: lan3, kind: rj45 }
+      - { name: lan4, kind: rj45 }
+      - { name: wifi, kind: wifi }
+      - { name: dc-in, kind: dc-in }
+  strip-1:
+    types: [strip]
+    location: Under the desk
+    expectedPower: wall
+    ports:
+      - { name: ac-in, kind: ac-in }
+      - { name: out1, kind: ac-out }
+      - { name: out2, kind: ac-out }
+      - { name: out3, kind: ac-out }
+      - { name: out4, kind: ac-out }
+      - { name: out5, kind: ac-out }
+      - { name: out6, kind: ac-out }
+  sw-1:
+    types: [switch]
+    location: Desk
+    admin: "http://{ip}"
+    expectedPower: wall
+    ports:
+      - { name: p1, kind: rj45 }
+      - { name: p2, kind: rj45 }
+      - { name: p3, kind: rj45 }
+      - { name: p4, kind: rj45 }
+      - { name: p5, kind: rj45 }
+      - { name: p6, kind: rj45 }
+      - { name: p7, kind: rj45 }
+      - { name: p8, kind: rj45 }
+      - { name: mgmt, kind: iface, virtual: true, ip: "192.168.1.2", mac: "02:00:00:00:00:02", vlan: LAN, services: http }
+      - { name: ac-in, kind: ac-in }
+  usbserial-01:
+    types: [adapter]
+    project: DEMO
+    location: Desk
+    notes: "Linux: minicom -b 115200 -D /dev/ttyUSB0"
+    ports:
+      - { name: usb1, kind: usb }
+      - { name: uart0, kind: uart }
+  wall-1:
+    types: [wall]
+    location: Desk wall
+    notes: Circuit C1
+    ports:
+      - { name: out1, kind: ac-out }
+      - { name: out2, kind: ac-out }
+  wall-2:
+    types: [wall]
+    location: Window wall
+    notes: Circuit C2
+    ports:
+      - { name: out1, kind: ac-out }
+      - { name: out2, kind: ac-out }
+links:
+  - { id: N-001, type: net, a: "sw-1:p8", b: "router-1:lan1", notes: Uplink }
+  - { id: N-002, type: net, a: "pc-01:eth0", b: "sw-1:p1" }
+  - { id: N-003, type: net, a: "board-01:eth0", b: "sw-1:p2" }
+  - { id: P-001, type: power, a: "wall-1:out1", b: "strip-1:ac-in" }
+  - { id: P-002, type: power, a: "strip-1:out1", b: "router-1:dc-in", notes: "12 V adapter" }
+  - { id: P-003, type: power, a: "strip-1:out2", b: "sw-1:ac-in" }
+  - { id: P-004, type: power, a: "strip-1:out3", b: "pc-01:ac-in" }
+  - { id: P-005, type: power, a: "strip-1:out4", b: "board-01:dc-in", notes: "5 V adapter" }
+  - { id: P-006, type: power, a: "wall-2:out1", b: "pc-02:ac-in", notes: Laptop charger }
+  - { id: S-001, type: serial, a: "board-01:uart0", b: "usbserial-01:uart0", notes: "3V3, 115200 8N1" }
+  - { id: U-001, type: usb, a: "usbserial-01:usb1", b: "pc-01:usb1" }
+  - { id: W-001, type: radio, a: "pc-02:wifi", b: "router-1:wifi" }
+ipUse:
+  - { vlan: LAN, from: "192.168.1.100", to: "192.168.1.199", who: router-1, notes: DHCP pool }
+log:
+  - { t: "2026-01-12T09:00:00.000Z", by: example, msg: Example lab, rev: 1 }

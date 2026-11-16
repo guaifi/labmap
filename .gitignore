@@ -1,0 +1,7 @@
+# Live data: created by server.py on first run, never committed
+data-do-not-edit/
+# Development
+node_modules/
+tools/shots/
+__pycache__/
+*.tmp
