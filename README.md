@@ -124,29 +124,84 @@ protects you from losing the Mac. Some care:
 - Sync is not history: a wrong change is synced too. The `backups/` folders (inside the
   data folder, so also in iCloud) and Time Machine give you the history.
 
-## Run as a service (Linux)
+## Run as a service (Linux, Raspberry Pi)
 
-`/etc/systemd/system/labmap.service`:
+The server starts with the computer and restarts if it stops. Code in `/opt/labmap`,
+data in `/var/lib/labmap`, run by its own user `labmap`. Replace `lab-1` with the name
+of your site (lower case, digits and `-`; it cannot be renamed from the page).
 
-```ini
+**1.** Put the code in `/opt/labmap`. With Internet access:
+
+```bash
+sudo git clone --branch v0.7.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+```
+
+Without Internet access, download `labmap-0.7.0.tar.gz` from the release page on
+another computer, copy it to `/tmp` (with `scp` or a USB stick) and extract it:
+
+```bash
+sudo mkdir -p /opt/labmap && sudo tar xzf /tmp/labmap-0.7.0.tar.gz --strip-components=1 -C /opt/labmap
+```
+
+**2.** Create the user that runs the server (it cannot log in) and the data folder:
+
+```bash
+sudo useradd -r -s /usr/sbin/nologin labmap
+```
+
+```bash
+sudo mkdir -p /var/lib/labmap && sudo chown labmap: /var/lib/labmap
+```
+
+**3.** Create the service file:
+
+```bash
+sudo tee /etc/systemd/system/labmap.service > /dev/null <<'EOF'
 [Unit]
 Description=Labmap
 After=network.target
 
 [Service]
-WorkingDirectory=/opt/labmap
 ExecStart=/usr/bin/python3 /opt/labmap/server.py --port 8080 --data /var/lib/labmap --site lab-1
 Restart=always
 User=labmap
 
 [Install]
 WantedBy=multi-user.target
+EOF
+```
+
+**4.** Start it now and at every boot:
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now labmap
+```
+
+**5.** Check it: `active (running)` and a line `Labmap at http://0.0.0.0:8080 ... sites: lab-1`.
+
+```bash
+systemctl status labmap --no-pager
+```
+
+Then open `http://<ip-of-this-computer>:8080` from another computer. If it does not
+load, open the port in the firewall (Ubuntu: `sudo ufw allow 8080/tcp`).
+
+Useful later: `sudo systemctl restart labmap` (after an update), `sudo systemctl stop
+labmap`, and `journalctl -u labmap -n 50 --no-pager` to see the saves and any error.
+
+To update without Internet access, stop the service, replace the code folder with the
+new archive and start it again (the data in `/var/lib/labmap` is not touched):
+
+```bash
+sudo systemctl stop labmap
 ```
 
 ```bash
-sudo useradd -r -s /usr/sbin/nologin labmap
-sudo mkdir -p /var/lib/labmap && sudo chown labmap: /var/lib/labmap
-sudo systemctl enable --now labmap
+sudo rm -rf /opt/labmap && sudo mkdir /opt/labmap && sudo tar xzf /tmp/labmap-0.7.1.tar.gz --strip-components=1 -C /opt/labmap
+```
+
+```bash
+sudo systemctl start labmap
 ```
 
 ## Backups and privacy
