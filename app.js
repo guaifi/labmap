@@ -133,8 +133,16 @@
      Devices (DUTs, boards, PCs, instruments; grouped by project in bands),
      Adapters (pass-through devices: serial and USB adapters, hubs, couplers),
      Network (routers, switches, APs, servers, radio hubs). Devices are stacked
-     first; the other columns are placed at the barycentre of their peers.
+     first; the other columns are placed at the barycentre of their peers. Then
+     a few rounds reorder the devices inside each project band by where their
+     peers are (all, network, adapters or power) and keep the order with fewest
+     crossings (mapCrossings). Columns spread to the width of the screen. The
+     layout is cached until the data, layers, project or width change.
      Cables that jump three or more columns are drawn faint until selected.
+     Cable id tags (selected cables only) are tried along the curve and put
+     where they cover no other tag or box (placeTags).
+   · Map taps: the first tap on a device or cable highlights it (selection bar
+     with Open); a second tap, or Open, opens its sheet.
      Physical position in the room is not used.
    · Exports: Map SVG is the whole lab whatever the filters, with its CSS inlined
      (light theme); Report HTML is one static file (map + tables) to print as PDF;
@@ -144,7 +152,12 @@
      carries the other's VLAN tagged. The IPs tab lists the members of each VLAN.
    · New cable with "How many" > 1 joins consecutive ports of the same type at both
      ends (only free ones when "Only free" is on), one id each, in one commit.
-     "Connect + next" keeps the wizard open on the same devices.
+     "Connect + next" keeps the wizard open on the same devices. With "Only free"
+     the port lists are not narrowed by the other end: choosing a port that does
+     not fit the other end clears that end, which is proposed again. "Swap"
+     exchanges the ends; a reversed power cable has "Swap ends" in Issues and in
+     its sheet. "VLANs" in a device sheet sets access and tagged VLANs on a range
+     of its network ports in one change.
    · A box only lists ports with a visible cable; free ports are in the device
      sheet. Ports in a box are ordered by where the other end is.
    · Project filter shows what the routes of its devices reach (a shared hub does
@@ -204,7 +217,7 @@
    · Undo covers the last change of this tab only.
    ============================================================================ */
 'use strict';
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 
 /* ---------------------------------------------------------------------------
    1. Utilities
@@ -508,7 +521,7 @@ function validate() {
       add('warn', 'vlan-mismatch', `Cable ${l.id}: ${l.a} is in VLAN ${A.p.vlan} and ${l.b} in ${B.p.vlan}`, { link: l.id, dev: A.dev });
     if (l.type === 'power') {
       const da = powerDir(A.p.kind), db = powerDir(B.p.kind);
-      if (da === 'in' && db === 'out') add('warn', 'direction', `Cable ${l.id}: reversed; the first end must be the outlet`, { link: l.id, dev: A.dev });
+      if (da === 'in' && db === 'out') add('warn', 'direction', `Cable ${l.id}: reversed; the first end must be the outlet`, { link: l.id, dev: A.dev, swap: true });
       else if (da && da === db) add('warn', 'direction', `Cable ${l.id}: joins two power ${da === 'in' ? 'inlets' : 'outlets'}`, { link: l.id, dev: A.dev });
     }
   }
@@ -1211,6 +1224,7 @@ function renderHeader() {
 function setTab(t) {
   if (!document.getElementById('t-' + t)) t = 'map';
   UI.tab = t;
+  document.body.dataset.tab = t;                                  // the map uses the whole width
   for (const s of document.querySelectorAll('main .tab')) s.hidden = s.id !== 't-' + t;
   renderHeader(); renderTab();
   try { if (location.hash.slice(1) !== t) location.hash = t; } catch (e) {}
@@ -1266,7 +1280,18 @@ function searchMatch(q) {
   return hits;
 }
 
-function buildMap() {
+/* The layout is kept while nothing it depends on changes (a tap only changes the
+   selection). gap: space between columns, wider on wide screens. */
+let MAPCACHE = null;
+function buildMap(gap) {
+  gap = Math.max(MAP.COLGAP, Math.round(gap || MAP.COLGAP));
+  const ck = [JSON.stringify(UI.layers), UI.project, gap].join('|');
+  if (MAPCACHE && MAPCACHE.ix === IX && MAPCACHE.k === ck) return MAPCACHE.L;
+  const L = layout(gap);
+  MAPCACHE = { ix: IX, k: ck, L };
+  return L;
+}
+function layout(gap) {
   const M = MAP, all = IX.names;
   /* 1. which devices and cables are visible */
   let vis = new Set(all), coreLinks = null;
@@ -1288,59 +1313,128 @@ function buildMap() {
   for (const b of box.values()) b.h = M.HEAD + b.rows.size * M.ROW + (b.rows.size ? 6 : 0);
   /* 3. columns by role; devices stacked by project, everything else level with what it connects */
   for (const b of box.values()) b.col = mapCol(b.n);
-  const colX = c => M.PADX + c * (M.W + M.COLGAP);
+  const colX = c => M.PADX + c * (M.W + gap);
   const peers = b => { const o = []; for (const r of b.rows.values()) for (const k of r.links) for (const e of ['a', 'b']) { const dn = refDev(k[e]); if (dn !== b.n) o.push(box.get(dn)); } return o; };
-  const bands = [], placed = new Set();
-  { const groups = new Map();
-    for (const b of box.values()) if (b.col === 2) push(groups, b.d.project || '', b);
+  /* devices stacked by project (bands); the order inside a band is refined below */
+  const groups = new Map();
+  for (const b of box.values()) if (b.col === 2) push(groups, b.d.project || '', b);
+  const gkeys = [...groups.keys()].sort((a, b) => (a === '') - (b === '') || natCmp(a, b));
+  for (const g of gkeys) groups.get(g).sort((p, q) => natCmp(p.n, q.n));
+  let bands = [];
+  const stack = () => {
+    bands = [];
     let y = M.TOP;
-    for (const g of [...groups.keys()].sort((a, b) => (a === '') - (b === '') || natCmp(a, b))) {
-      const bs = groups.get(g).sort((p, q) => natCmp(p.n, q.n)), y0 = y;
+    for (const g of gkeys) {
+      const y0 = y;
       y += M.BAND;
-      for (const b of bs) { b.x = colX(2); b.y = y; y += b.h + M.GAPY; placed.add(b); }
+      for (const b of groups.get(g)) { b.x = colX(2); b.y = y; y += b.h + M.GAPY; }
       bands.push({ g, x: colX(2) - 6, y: y0, w: M.W + 12, h: y - y0 - M.GAPY + 7 });
       y += 14;
-    } }
-  for (const c of [1, 3, 0, 4]) {                              // nearest columns first: each box at the barycentre of its peers
-    const bs = [...box.values()].filter(b => b.col === c), want = new Map();
-    for (const b of bs) { const ys = peers(b).filter(o => placed.has(o)).map(o => o.y + o.h / 2); if (ys.length) want.set(b, avg(ys)); }
-    for (let pass = 0; pass < 3; pass++) for (const b of bs) if (!want.has(b)) { const ys = peers(b).filter(o => want.has(o)).map(o => want.get(o)); if (ys.length) want.set(b, avg(ys)); }
-    bs.sort((p, q) => (want.has(p) ? want.get(p) : 1e9) - (want.has(q) ? want.get(q) : 1e9) || natCmp(p.n, q.n));
-    let y = M.TOP + M.BAND;
-    for (const b of bs) { b.x = colX(c); b.y = want.has(b) ? Math.max(y, Math.round(want.get(b) - b.h / 2)) : y; y = b.y + b.h + M.GAPY; placed.add(b); }
-  }
-  /* 4. rows ordered by where the other end is, and the exit side of each cable */
-  /* same column: outer columns bulge outwards, inner ones towards the devices, devices by layer */
+    }
+  };
+  /* the other columns: each box at the barycentre of its peers, nearest columns first */
+  const others = () => {
+    const placed = new Set([...box.values()].filter(b => b.col === 2));
+    for (const c of [1, 3, 0, 4]) {
+      const bs = [...box.values()].filter(b => b.col === c), want = new Map();
+      for (const b of bs) { const ys = peers(b).filter(o => placed.has(o)).map(o => o.y + o.h / 2); if (ys.length) want.set(b, avg(ys)); }
+      for (let pass = 0; pass < 3; pass++) for (const b of bs) if (!want.has(b)) { const ys = peers(b).filter(o => want.has(o)).map(o => want.get(o)); if (ys.length) want.set(b, avg(ys)); }
+      bs.sort((p, q) => (want.has(p) ? want.get(p) : 1e9) - (want.has(q) ? want.get(q) : 1e9) || natCmp(p.n, q.n));
+      let y = M.TOP + M.BAND;
+      for (const b of bs) { b.x = colX(c); b.y = want.has(b) ? Math.max(y, Math.round(want.get(b) - b.h / 2)) : y; y = b.y + b.h + M.GAPY; placed.add(b); }
+    }
+  };
+  /* rows ordered by where the other end is, and the exit side of each cable;
+     same column: outer columns bulge outwards, inner ones towards the devices, devices by layer */
   const sideFor = (b, o, k) => (o.col > b.col ? 1 : o.col < b.col ? -1 : b.col === 0 || b.col === 3 ? -1 : b.col === 4 || b.col === 1 ? 1 : k.type === 'power' ? -1 : 1);
-  for (const b of box.values()) {
-    const rows = [...b.rows.values()], me = pn => b.n + ':' + pn;
-    for (const r of rows) { const k = r.links[0], o = box.get(refDev(k.a === me(r.pn) ? k.b : k.a)); r.peerY = o.y + o.h / 2; r.side = sideFor(b, o, k); }
-    rows.sort((p, q) => p.peerY - q.peerY || natCmp(p.pn, q.pn));
-    rows.forEach((r, i) => { r.y = b.y + M.HEAD + i * M.ROW + M.ROW / 2 + 2; });
-    b.rowList = rows;
+  const rowsAndCables = () => {
+    for (const b of box.values()) {
+      const rows = [...b.rows.values()], me = pn => b.n + ':' + pn;
+      for (const r of rows) { const k = r.links[0], o = box.get(refDev(k.a === me(r.pn) ? k.b : k.a)); r.peerY = o.y + o.h / 2; r.side = sideFor(b, o, k); }
+      rows.sort((p, q) => p.peerY - q.peerY || natCmp(p.pn, q.pn));
+      rows.forEach((r, i) => { r.y = b.y + M.HEAD + i * M.ROW + M.ROW / 2 + 2; });
+      b.rowList = rows;
+    }
+    for (const k of links) {
+      const [an, ap] = splitRef(k.a), [bn, bp] = splitRef(k.b), A = box.get(an), B = box.get(bn);
+      const sa = sideFor(A, B, k), sb = sideFor(B, A, k);
+      const x1 = sa > 0 ? A.x + M.W : A.x, y1 = A.rows.get(ap).y, x2 = sb > 0 ? B.x + M.W : B.x, y2 = B.rows.get(bp).y;
+      const dx = A.col === B.col ? 16 + Math.min(48, Math.abs(y2 - y1) * 0.1) : Math.max(28, Math.abs(x2 - x1) * 0.45);
+      const c1 = Math.round(x1 + sa * dx), c2 = Math.round(x2 + sb * dx);
+      k.d = `M${x1} ${y1}C${c1} ${y1} ${c2} ${y2} ${x2} ${y2}`;
+      k.bz = [x1, y1, c1, y1, c2, y2, x2, y2];
+      k.devs = [an, bn];
+      k.far = Math.abs(A.col - B.col) >= 3;
+      k.ends = A.col <= B.col ? [A.col, y1, B.col, y2] : [B.col, y2, A.col, y1];
+    }
+  };
+  /* a few rounds: devices in each band ordered by where their peers are (all of them,
+     or only those in one column: network, adapters, power), then the other columns
+     again; the order with fewest crossings wins (ties: the earlier one) */
+  stack(); others(); rowsAndCables();
+  let best = { n: mapCrossings({ links }), order: gkeys.map(g => groups.get(g).slice()) };
+  const KEYS = [c => c !== 2, c => c === 4, c => c === 3, c => c === 0 || c === 1];
+  for (let it = 0; it < 4 && best.n > 0; it++) {
+    const start = gkeys.map(g => groups.get(g).slice()), ys = new Map();
+    for (const b of box.values()) ys.set(b, b.y + b.h / 2);
+    let round = null;
+    for (const use of KEYS) {
+      gkeys.forEach((g, i) => {
+        const bs = start[i], key = new Map();
+        for (const b of bs) { const v = peers(b).filter(o => use(o.col)).map(o => ys.get(o)); key.set(b, v.length ? avg(v) : null); }
+        const moving = bs.filter(b => key.get(b) != null).sort((p, q) => key.get(p) - key.get(q) || natCmp(p.n, q.n));
+        let mi = 0;
+        groups.set(g, bs.map(b => (key.get(b) == null ? b : moving[mi++])));      // a box with no such peer keeps its slot
+      });
+      stack(); others(); rowsAndCables();
+      const n = mapCrossings({ links });
+      if (!round || n < round.n) round = { n, order: gkeys.map(g => groups.get(g).slice()) };
+    }
+    if (round.n < best.n) { best = round; gkeys.forEach((g, i) => groups.set(g, best.order[i])); stack(); others(); rowsAndCables(); }
+    else break;
   }
+  gkeys.forEach((g, i) => groups.set(g, best.order[i]));
+  stack(); others(); rowsAndCables();
   let H = 60;
   for (const b of box.values()) H = Math.max(H, b.y + b.h + 16);
-  const W = M.PADX * 2 + 5 * M.W + 4 * M.COLGAP;
-  /* 5. cable geometry */
-  for (const k of links) {
-    const [an, ap] = splitRef(k.a), [bn, bp] = splitRef(k.b), A = box.get(an), B = box.get(bn);
-    const sa = sideFor(A, B, k), sb = sideFor(B, A, k);
-    const x1 = sa > 0 ? A.x + M.W : A.x, y1 = A.rows.get(ap).y, x2 = sb > 0 ? B.x + M.W : B.x, y2 = B.rows.get(bp).y;
-    const dx = A.col === B.col ? 16 + Math.min(48, Math.abs(y2 - y1) * 0.1) : Math.max(28, Math.abs(x2 - x1) * 0.45);
-    const c1 = Math.round(x1 + sa * dx), c2 = Math.round(x2 + sb * dx);
-    k.d = `M${x1} ${y1}C${c1} ${y1} ${c2} ${y2} ${x2} ${y2}`;
-    k.mid = [Math.round((x1 + 3 * c1 + 3 * c2 + x2) / 8), Math.round((y1 + y2) / 2)];
-    k.devs = [an, bn];
-    k.far = Math.abs(A.col - B.col) >= 3;
-  }
+  const W = M.PADX * 2 + 5 * M.W + 4 * gap;
   return { W, H, box, links, bands, colX };
 }
 
+/* Cable id tags of the highlighted cables: tried along each curve (middle first) and put
+   where they do not cover another tag or a device box; if every spot is taken, the
+   least covered one. */
+function placeTags(tags, boxes) {
+  const T = [0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78, 0.15, 0.85], H = 13, out = [], taken = [];
+  for (const b of boxes || []) taken.push([b.x, b.y, b.x + MAP.W, b.y + b.h]);
+  const at = (z, t) => { const u = 1 - t; return [u * u * u * z[0] + 3 * u * u * t * z[2] + 3 * u * t * t * z[4] + t * t * t * z[6], u * u * u * z[1] + 3 * u * u * t * z[3] + 3 * u * t * t * z[5] + t * t * t * z[7]]; };
+  const cover = r => taken.reduce((s, q) => s + Math.max(0, Math.min(r[2], q[2]) - Math.max(r[0], q[0])) * Math.max(0, Math.min(r[3], q[3]) - Math.max(r[1], q[1])), 0);
+  for (const k of tags.slice().sort((p, q) => Math.abs(p.bz[6] - p.bz[0]) - Math.abs(q.bz[6] - q.bz[0]))) {      // short cables first: they have fewer spots
+    const w = k.id.length * 5.4 + 8;
+    let best = null;
+    for (const t of T) {
+      const [x, y] = at(k.bz, t), r = [x - w / 2 - 1, y - H / 2 - 1, x + w / 2 + 1, y + H / 2 + 1], c = cover(r);
+      if (!best || c < best.c) best = { c, x: Math.round(x), y: Math.round(y), r };
+      if (!c) break;
+    }
+    taken.push(best.r);
+    out.push({ k, w, x: best.x, y: best.y });
+  }
+  return out;
+}
+/* Cables between the same two columns whose ends are in opposite order (for tests). */
+function mapCrossings(L) {
+  L = L || buildMap();
+  const by = new Map();
+  for (const k of L.links) if (k.ends[0] !== k.ends[2]) push(by, k.ends[0] + '-' + k.ends[2], k.ends);
+  let n = 0;
+  for (const ls of by.values()) for (let i = 0; i < ls.length; i++) for (let j = i + 1; j < ls.length; j++) if ((ls[i][1] - ls[j][1]) * (ls[i][3] - ls[j][3]) < 0) n++;
+  return n;
+}
 /* The map as SVG text. o.scale: 0 = fit width; o.hits: search matches; o.style: CSS to
    embed (standalone export). */
 function mapSvg(o) {
-  const M = MAP, L = buildMap(), hits = o.hits || null;
+  const M = MAP, L = buildMap(o.gap), hits = o.hits || null;
   const selOn = (UI.sel && L.box.has(UI.sel)) || UI.selLink;
   const out = [];
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" class="map${selOn ? ' has-sel' : ''}" viewBox="0 0 ${L.W} ${L.H}" ${o.scale ? `width="${Math.round(L.W * o.scale)}" height="${Math.round(L.H * o.scale)}"` : 'width="100%"'} data-act="map-bg" role="img" aria-label="Map of devices and cables">`);
@@ -1368,17 +1462,34 @@ function mapSvg(o) {
     }
     out.push('</g>');
   }
-  for (const k of tags) { const w = k.id.length * 5.4 + 8; out.push(`<g class="ltag" data-act="cable" data-id="${esc(k.id)}"><rect x="${k.mid[0] - w / 2}" y="${k.mid[1] - 7}" width="${w}" height="13" rx="2"/><text x="${k.mid[0]}" y="${k.mid[1] + 3}" text-anchor="middle">${esc(k.id)}</text></g>`); }
+  for (const t of placeTags(tags, [...L.box.values()])) out.push(`<g class="ltag" data-act="cable" data-id="${esc(t.k.id)}"><rect x="${t.x - t.w / 2}" y="${t.y - 7}" width="${t.w}" height="13" rx="2"/><text x="${t.x}" y="${t.y + 3}" text-anchor="middle">${esc(t.k.id)}</text></g>`);
   out.push('</svg>');
   return { svg: out.join(''), L };
 }
 function renderMap() {
   const q = UI.q.trim().toLowerCase(), hits = q ? searchMatch(q) : null;
-  const r = mapSvg({ scale: UI.fit ? 0 : UI.zoom, hits }), L = r.L;
+  const avail = (($('#mapwrap') || {}).clientWidth || 0) - 18;      // columns spread to fill a wide screen (room left for a scroll bar)
+  const r = mapSvg({ scale: UI.fit ? 0 : UI.zoom, hits, gap: Math.min(MAP.COLGAP * 3, (avail / (UI.fit ? 1 : UI.zoom) - 2 * MAP.PADX - 5 * MAP.W) / 4) }), L = r.L;
   LAYOUT = L;
   $('#map').innerHTML = r.svg;
   $('#map-hint').textContent = IX.names.length ? `${plural(L.box.size, 'device')} · ${plural(L.links.length, 'cable')}` + (hits ? ` · ${hits.size} ${hits.size === 1 ? 'match' : 'matches'}` : '') : 'No devices. Edit > + Device, or Data > Load example.';
   if (UI.center) { const n = UI.center; UI.center = null; centerOn(n); }
+  renderSelbar(L);
+}
+/* What is selected on the map: first tap highlights, a second tap (or Open) opens it. */
+function renderSelbar(L) {
+  const bar = $('#selbar');
+  if (!bar) return;
+  let h = '';
+  if (UI.sel && L.box.has(UI.sel)) {
+    const n = UI.sel, d = S.devices[n], ls = L.links.filter(k => k.devs.includes(n));
+    h = `<b class="mono">${esc(n)}</b><span class="mut">${esc(d.types.map(typeLabel).join(', '))} · ${plural(ls.length, 'cable')}</span>`;
+  } else if (UI.selLink) {
+    const l = S.links.find(x => x.id === UI.selLink);
+    if (l) h = `<b class="mono">${esc(l.id)}</b><span class="mut mono">${esc(l.a)} ↔ ${esc(l.b)}</span>`;
+  }
+  bar.innerHTML = h ? h + '<span class="sp"></span><button class="btn sm pri" data-act="sel-open">Open</button><button class="btn sm" data-act="map-bg" aria-label="Clear selection">✕</button>'
+    : `<span class="mut">${IX.names.length ? 'Tap a device or cable to highlight it; tap again to open it.' : ''}</span>`;
 }
 /* The whole map (every layer, no filter, no selection) as a standalone SVG file, with
    the page's map styles embedded and resolved to the light theme. */
@@ -1527,7 +1638,7 @@ function renderIps() {
 
 function renderIssues() {
   const e = IX.issues.filter(i => i.level === 'err'), w = IX.issues.filter(i => i.level === 'warn');
-  const row = i => `<button class="item" data-act="issue" data-dev="${esc(i.dev || '')}" data-link="${esc(i.link || '')}" data-v="${esc(i.vlan || '')}"><i class="dot ${i.level}"></i><span style="flex:1;min-width:0">${esc(i.msg)}</span></button>`;
+  const row = i => `<div class="item iss-row"><button class="item" data-act="issue" data-dev="${esc(i.dev || '')}" data-link="${esc(i.link || '')}" data-v="${esc(i.vlan || '')}"><i class="dot ${i.level}"></i><span style="flex:1;min-width:0">${esc(i.msg)}</span></button>${i.swap ? `<button class="btn sm ed" data-act="link-swap" data-link="${esc(i.link)}">Swap ends</button>` : ''}</div>`;
   let h = `<h3 style="margin-top:0">Errors (${e.length})</h3>` + (e.length ? '<div class="list">' + e.map(row).join('') + '</div>' : '<p class="mut">None.</p>');
   h += `<h3>Warnings (${w.length})</h3>` + (w.length ? '<div class="list">' + w.map(row).join('') + '</div>' : '<p class="mut">None.</p>');
   $('#issues').innerHTML = h;
@@ -1620,6 +1731,40 @@ function userDlg(next) {
   });
 }
 
+/* ---------- VLAN on a range of ports (switch ports, typically) ---------- */
+function vlanRangeDlg(name) {
+  const net = () => (S.devices[name] ? S.devices[name].ports.filter(p => isNetKind(p.kind) && !p.virtual) : []);
+  const ps0 = net(), w = { from: ps0.length ? ps0[0].name : '', to: ps0.length ? ps0[ps0.length - 1].name : '', vlan: '=', tagged: '', clearTagged: false };
+  const range = () => { const ps = net(), i = ps.findIndex(p => p.name === w.from), j = ps.findIndex(p => p.name === w.to); return i < 0 || j < 0 ? [] : ps.slice(Math.min(i, j), Math.max(i, j) + 1); };
+  openDlg({
+    title: () => 'VLANs · ' + name,
+    body() {
+      const ps = net(), vl = Object.keys(S.vlans).sort(natCmp), r = range();
+      return '<div class="g2">' + fld('From port', `<select data-f="from">${ps.map(p => opt(p.name, p.name, w.from)).join('')}</select>`) + fld('To port', `<select data-f="to">${ps.map(p => opt(p.name, p.name, w.to)).join('')}</select>`) + '</div>' +
+        fld('Access VLAN (untagged)', `<select data-f="vlan">${opt('=', '— keep —', w.vlan)}${opt('', '— none —', w.vlan)}${vl.map(v => opt(v, v, w.vlan)).join('')}</select>`) +
+        fld('Tagged VLANs (trunk), comma separated · empty = keep', inp('tagged', w.tagged, 'autocapitalize="off"')) +
+        `<label class="tog"><input type="checkbox" data-f="clearTagged"${w.clearTagged ? ' checked' : ''}> Remove tagged VLANs</label>` +
+        `<p class="mut">${plural(r.length, 'port')}${r.length ? ': ' + esc(r[0].name) + (r.length > 1 ? ' … ' + esc(r[r.length - 1].name) : '') : ''}</p>`;
+    },
+    foot: () => '<button class="btn" data-act="dlg-back">Cancel</button><button class="btn pri" data-act="save">Apply</button>',
+    set(f, v) { w[f] = v; },
+    on: { save: () => {
+      if (!NET.editing) return toast('Edit mode required.');
+      const r = range().map(p => p.name), tg = String(w.tagged || '').split(/[\s,]+/).filter(Boolean);
+      if (!r.length) return toast('No ports.');
+      if (w.vlan === '=' && !tg.length && !w.clearTagged) return toast('Nothing to change.');
+      const what = [w.vlan === '=' ? '' : 'access ' + (w.vlan || 'none'), w.clearTagged ? 'no tagged' : tg.length ? 'tagged ' + tg.join(', ') : ''].filter(Boolean).join(', ');
+      if (commit(`${name} ${r[0]}${r.length > 1 ? '…' + r[r.length - 1] : ''} (${plural(r.length, 'port')}): ${what}`, s => {
+        for (const p of s.devices[name].ports) {
+          if (!r.includes(p.name)) continue;
+          if (w.vlan !== '=') { if (w.vlan) p.vlan = w.vlan; else delete p.vlan; }
+          if (w.clearTagged) delete p.vlans; else if (tg.length) p.vlans = tg.slice();
+        }
+      })) closeDlg();
+    } }
+  });
+}
+
 /* ---------- Sites ---------- */
 function goSite(name) {
   if (!name || name === SITE) return;
@@ -1693,7 +1838,7 @@ function devSheet(name) {
       }
       return h + '</tbody></table></div>';
     },
-    foot: () => (S.devices[name] ? '<button class="btn" data-act="see">Map</button><button class="btn pri ed" data-act="link">+ Cable</button><button class="btn ed" data-act="edit">Edit</button><button class="btn ed" data-act="dup">Duplicate</button><button class="btn ed" data-act="tpl">To template</button><button class="btn ed dan" data-act="del">Delete</button>' : ''),
+    foot: () => (S.devices[name] ? '<button class="btn" data-act="see">Map</button><button class="btn pri ed" data-act="link">+ Cable</button><button class="btn ed" data-act="edit">Edit</button>' + (S.devices[name].ports.some(p => isNetKind(p.kind)) ? '<button class="btn ed" data-act="vlans">VLANs</button>' : '') + '<button class="btn ed" data-act="dup">Duplicate</button><button class="btn ed" data-act="tpl">To template</button><button class="btn ed dan" data-act="del">Delete</button>' : ''),
     on: {
       'p-tog': el => { const p = el.dataset.p; if (open.has(p)) open.delete(p); else open.add(p); renderDlg(); },
       'p-conn': el => wizLink({ from: name + ':' + el.dataset.p }),
@@ -1702,6 +1847,7 @@ function devSheet(name) {
       edit: () => wizDevice({ edit: name }),
       dup: () => wizDevice({ dup: name }),
       tpl: () => tplFromDevice(name),
+      vlans: () => vlanRangeDlg(name),
       del: () => { const k = (IX.byDev.get(name) || []).length; confirmDlg(`Delete ${name}` + (k ? ` and its ${plural(k, 'cable')}?` : '?'), () => {
         if (commit(`Device ${name} deleted` + (k ? ` with ${plural(k, 'cable')}` : ''), s => { delete s.devices[name]; s.links = s.links.filter(l => refDev(l.a) !== name && refDev(l.b) !== name); for (const e of s.ipUse) if (e.iface && refDev(e.iface) === name) delete e.iface; })) { if (UI.sel === name) UI.sel = null; closeDlg(true); renderTab(); }
       }, 'Delete', true); }
@@ -1728,7 +1874,7 @@ function cableSheet(id) {
       if (full.length) h += '<p class="lbl">Full route</p>' + full.map(routeHtml).join('');
       return h;
     },
-    foot: () => (get() ? '<button class="btn" data-act="see">Map</button><button class="btn ed" data-act="edit">Edit</button><button class="btn ed dan" data-act="del">Remove</button>' : ''),
+    foot: () => (get() ? '<button class="btn" data-act="see">Map</button><button class="btn ed" data-act="link-swap" data-link="' + esc(id) + '">Swap ends</button><button class="btn ed" data-act="edit">Edit</button><button class="btn ed dan" data-act="del">Remove</button>' : ''),
     on: {
       see: () => { const l = get(); closeDlg(true); UI.selLink = id; UI.sel = null; UI.layers[linkLayer(l)] = true; UI.center = refDev(l.a); setTab('map'); },
       edit: () => wizLink({ edit: id }),
@@ -1951,6 +2097,14 @@ function wizLink(o) {
       if (e.dev && !e.port && w.hold !== end) { const p = S.devices[e.dev].ports.find(p => portOk(e.dev, p, f, w.edit)) || (w.strict ? null : S.devices[e.dev].ports[0]); if (p) e.port = p.name; }
     }
   };
+  /* lists show every free port of the shortcut, not only those matching the other end:
+     choosing one that does not fit clears the other end instead (see set) */
+  const listFilt = end => Object.assign({}, (SHORTCUTS.find(s => s.k === w.sc) || SHORTCUTS[0])[end]);
+  const clash = (pa, pb) => {
+    const la = layerOf(pa.kind), lb = layerOf(pb.kind);
+    if (la !== lb && la !== 'other' && lb !== 'other') return true;
+    return la === 'power' && lb === 'power' && !!powerDir(pa.kind) && powerDir(pa.kind) === powerDir(pb.kind);
+  };
   const autoType = () => { const pa = portAt('a'), pb = portAt('b'), la = pa ? layerOf(pa.kind) : 'other', lb = pb ? layerOf(pb.kind) : 'other'; return la !== 'other' ? la : lb; };
   const resType = () => (w.type === 'auto' ? autoType() : w.type);
   const curId = () => (w.idManual ? String(w.id || '').trim() : nextCableId(resType()));
@@ -1980,7 +2134,9 @@ function wizLink(o) {
   const pairs = () => { const n = count(), A = seq('a', n), B = seq('b', n), k = Math.min(A.length, B.length); return Array.from({ length: k }, (_, i) => [w.a.dev + ':' + A[i], w.b.dev + ':' + B[i]]); };
   const warnHtml = () => {
     const warn = m => `<div class="iss warn"><b>Warning</b><span>${esc(m)}</span></div>`, n = count();
-    let h = warns().map(warn).join('');
+    const ws = warns();
+    let h = ws.map(warn).join('');
+    if (ws.some(m => /^Reversed/.test(m))) h += '<p><button class="btn sm" data-act="w-swap">Swap ends</button></p>';
     if (n > 1) { const ps = pairs(); if (ps.length < n) h += warn(`Only ${ps.length} consecutive ports available.`); h += `<p class="lbl">${plural(ps.length, 'cable')}</p><div class="chain">` + ps.slice(0, 6).map(p => esc(p[0]) + ' ↔ ' + esc(p[1])).join('<br>') + (ps.length > 6 ? '<br>…' : '') + '</div>'; }
     return h;
   };
@@ -2001,7 +2157,7 @@ function wizLink(o) {
     else closeDlg();
   };
   const endHtmlSel = (end, label) => {
-    const e = w[end], f = filt(end);
+    const e = w[end], f = w.strict ? listFilt(end) : filt(end);
     let devs = w.strict ? IX.names.filter(n => devOk(n, f, w.edit)) : IX.names.slice();
     if (e.dev && !devs.includes(e.dev)) devs.unshift(e.dev);
     let h = `<p class="lbl">${label}</p><div class="g2">` + fld('Device', `<select data-f="${end}|dev">${opt('', '— choose —', e.dev)}${devs.map(n => opt(n, n + (S.devices[n].project ? ' · ' + S.devices[n].project : ''), e.dev)).join('')}</select>`);
@@ -2017,16 +2173,25 @@ function wizLink(o) {
       const pow = resType() === 'power';
       let h = '<div class="lays">' + SHORTCUTS.map(s => `<button class="lay${s.k === w.sc ? ' on' : ''}" data-act="w-sc" data-k="${s.k}" aria-pressed="${s.k === w.sc}">${esc(s.label)}</button>`).join('') + '</div>';
       h += `<label class="tog"><input type="checkbox" data-f="strict"${w.strict ? ' checked' : ''}> Only free, compatible ports</label>`;
-      h += endHtmlSel('a', pow ? 'From (outlet)' : 'From') + endHtmlSel('b', pow ? 'To (inlet)' : 'To');
+      h += endHtmlSel('a', pow ? 'From (outlet)' : 'From') + `<div class="row" style="margin:6px 0 -4px"><button class="btn sm" data-act="w-swap" aria-label="Swap ends">⇅ Swap</button></div>` + endHtmlSel('b', pow ? 'To (inlet)' : 'To');
       h += '<div class="g2">' + fld('Cable type', `<select data-f="type">${opt('auto', 'Auto: ' + LAYERS[autoType()].label, w.type)}${LAYER_KEYS.map(k => opt(k, LAYERS[k].label, w.type)).join('')}</select>`) + fld('Id (label)', inp('id', curId())) + '</div>';
       h += '<div class="g2">' + fld('Note', inp('notes', w.notes)) + (w.edit ? '' : fld('How many (consecutive ports)', `<input type="number" inputmode="numeric" min="1" max="96" data-f="count" data-re value="${esc(w.count)}">`)) + '</div>';
       return h + '<div id="w-warn">' + warnHtml() + '</div>';
     },
     foot: () => `<button class="btn" data-act="dlg-back">Cancel</button>${w.edit ? '<button class="btn dan" data-act="del">Remove</button>' : ''}${w.edit ? '' : '<button class="btn" data-act="next">Connect + next</button>'}<button class="btn pri" data-act="save">${w.edit ? 'Save' : 'Connect'}</button>`,
     partial() { const a = $('#w-warn'); if (a) a.innerHTML = warnHtml(); },
-    set(f, v) { const p = f.split('|'); if (p.length === 2) { w[p[0]][p[1]] = v; if (p[1] === 'dev') w[p[0]].port = ''; if (p[0] === w.hold) w.hold = ''; } else { w[f] = v; if (f === 'id') w.idManual = true; } },
+    set(f, v) {
+      const p = f.split('|');
+      if (p.length !== 2) { w[f] = v; if (f === 'id') w.idManual = true; return; }
+      const [end, k] = p, other = end === 'a' ? 'b' : 'a';
+      w[end][k] = v;
+      if (k === 'dev') w[end].port = '';
+      if (end === w.hold) w.hold = '';
+      if (k === 'port' && w.strict && portAt(end) && portAt(other) && clash(portAt(end), portAt(other))) { w[other].port = ''; if (w.hold === other) w.hold = ''; }      // the other end no longer fits: propose again
+    },
     fix,
     on: {
+      'w-swap': () => { [w.a, w.b] = [w.b, w.a]; const sw = x => (x === 'a' ? 'b' : x === 'b' ? 'a' : x); w.pin = sw(w.pin); w.hold = sw(w.hold); renderDlg(); },
       'w-sc': el => { w.sc = el.dataset.k; w.hold = ''; for (const e of ['a', 'b']) if (e !== w.pin) w[e] = { dev: '', port: '' }; fix(); renderDlg(); },
       del: () => { const l = S.links.find(x => x.id === w.edit); if (l && commit(`Cable ${l.id} removed (${l.a} ↔ ${l.b})`, s => { s.links = s.links.filter(x => x !== l); })) closeDlg(true); },
       save: () => doSave(false),
@@ -2292,8 +2457,20 @@ const ACT = {
   zoom: el => { UI.fit = false; UI.zoom = Math.max(0.3, Math.min(3, UI.zoom * (+el.dataset.z > 0 ? 1.25 : 0.8))); renderMapTab(); },
   fit: () => { UI.fit = !UI.fit; if (!UI.fit) UI.zoom = 1; renderMapTab(); },
   'map-bg': () => { if (UI.sel || UI.selLink) { UI.sel = UI.selLink = null; renderMap(); } },
-  dev: el => { const n = el.dataset.dev; if (!S.devices[n]) return toast(`${n} does not exist.`); if (el.dataset.map) { UI.sel = n; UI.selLink = null; renderMap(); } devSheet(n); },
-  cable: el => { const id = el.dataset.id; if (!S.links.some(l => l.id === id)) return; if (el.closest('svg')) { UI.selLink = id; UI.sel = null; renderMap(); } cableSheet(id); },
+  dev: el => {
+    const n = el.dataset.dev;
+    if (!S.devices[n]) return toast(`${n} does not exist.`);
+    if (el.dataset.map && UI.sel !== n) { UI.sel = n; UI.selLink = null; return renderMap(); }      // map: first tap highlights
+    devSheet(n);
+  },
+  'link-swap': el => { const id = el.dataset.link, l = S.links.find(x => x.id === id); if (l && commit(`Cable ${id}: ends swapped (${l.b} ↔ ${l.a})`, s => { const x = s.links.find(y => y.id === id); [x.a, x.b] = [x.b, x.a]; })) { renderTab(); renderDlg(); } },
+  'sel-open': () => { if (UI.sel && S.devices[UI.sel]) devSheet(UI.sel); else if (UI.selLink) cableSheet(UI.selLink); },
+  cable: el => {
+    const id = el.dataset.id;
+    if (!S.links.some(l => l.id === id)) return;
+    if (el.closest('svg') && UI.selLink !== id) { UI.selLink = id; UI.sel = null; return renderMap(); }
+    cableSheet(id);
+  },
   'add-dev': () => wizDevice(),
   'add-link': () => wizLink(),
   vlan: el => { UI.vlan = el.dataset.v; UI.ipBlock = null; renderIps(); },
@@ -2324,6 +2501,8 @@ const ACT = {
 let deb = 0;
 const debounce = (fn, ms) => { clearTimeout(deb); deb = setTimeout(fn, ms || 180); };
 function wire() {
+  let rw = 0;
+  window.addEventListener('resize', () => { clearTimeout(rw); rw = setTimeout(() => { if (UI.tab === 'map') renderMap(); }, 250); });      // the map spreads to the new width
   document.addEventListener('click', e => {
     NET.lastAct = Date.now();
     if (e.target.id === 'dlg-back') return closeDlg(true);
@@ -2396,7 +2575,7 @@ async function boot() {
 /* Pure functions in view: for tests, for the console and for tools/ (Node). */
 const API = {
   VERSION, get site() { return SITE; }, get state() { return S; }, get index() { return IX; }, get net() { return NET; }, get ui() { return UI; },
-  layerOf, powerDir, isNetKind, kindKey, mapCol, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
+  layerOf, powerDir, isNetKind, kindKey, mapCol, mapCrossings, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
   FORMAT, toYaml, toCatalogYaml, parseYaml, readData, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
   /* load a lab without edit mode or saving (tests and console) */
   load: st => { st.catalog = st.catalog || clone(S.catalog); S = normalize(st); UNDO = null; refreshAll(); }

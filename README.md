@@ -16,6 +16,7 @@ uses. One web page, one small Python server, two YAML files. No dependencies.
   netmask, gateway, DNS, "give me a free IP", and the ports in each VLAN (access and
   tagged trunk ports).
 - **Cables in bulk** (consecutive ports) and a **labels CSV** for the label printer.
+- **VLANs on a range of ports** of a switch in one go.
 - **Validation** that never blocks: duplicate IP or MAC, cable to a missing port,
   mismatched port types, device with no power cable.
 - **Catalog** of port types and device templates, editable from the page.
@@ -29,7 +30,7 @@ Needs Python 3.7 or later (Linux, Windows or macOS). Nothing else to install. Pi
 released version from the [tags](https://github.com/guaifi/labmap/tags):
 
 ```bash
-git clone --branch v0.7.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+git clone --branch v0.8.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
 ```
 
 ```bash
@@ -39,7 +40,7 @@ python3 /opt/labmap/server.py --port 8080
 Without Git, download the archive of that version instead:
 
 ```bash
-mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.7.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
+mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.8.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
 ```
 
 Open `http://<host>:8080`. Press **Edit**, type a user name, add devices and cables.
@@ -81,7 +82,7 @@ The code and the data are separate, so updating never touches the data. With Git
 to the version you want (or back to the previous one):
 
 ```bash
-cd /opt/labmap && git fetch --depth 1 origin tag v0.7.1 && git checkout v0.7.1
+cd /opt/labmap && git fetch --depth 1 origin tag v0.8.1 && git checkout v0.8.1
 ```
 
 ```bash
@@ -104,7 +105,7 @@ the first `python3` asks for them). Code anywhere, data in a folder of your choi
 reachable from this Mac:
 
 ```bash
-git clone --branch v0.7.0 --depth 1 https://github.com/guaifi/labmap.git ~/labmap
+git clone --branch v0.8.0 --depth 1 https://github.com/guaifi/labmap.git ~/labmap
 ```
 
 ```bash
@@ -133,14 +134,14 @@ of your site (lower case, digits and `-`; it cannot be renamed from the page).
 **1.** Put the code in `/opt/labmap`. With Internet access:
 
 ```bash
-sudo git clone --branch v0.7.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+sudo git clone --branch v0.8.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
 ```
 
-Without Internet access, download `labmap-0.7.0.tar.gz` from the release page on
+Without Internet access, download `labmap-0.8.0.tar.gz` from the release page on
 another computer, copy it to `/tmp` (with `scp` or a USB stick) and extract it:
 
 ```bash
-sudo mkdir -p /opt/labmap && sudo tar xzf /tmp/labmap-0.7.0.tar.gz --strip-components=1 -C /opt/labmap
+sudo mkdir -p /opt/labmap && sudo tar xzf /tmp/labmap-0.8.0.tar.gz --strip-components=1 -C /opt/labmap
 ```
 
 **2.** Create the user that runs the server (it cannot log in) and the data folder:
@@ -197,7 +198,7 @@ sudo systemctl stop labmap
 ```
 
 ```bash
-sudo rm -rf /opt/labmap && sudo mkdir /opt/labmap && sudo tar xzf /tmp/labmap-0.7.1.tar.gz --strip-components=1 -C /opt/labmap
+sudo rm -rf /opt/labmap && sudo mkdir /opt/labmap && sudo tar xzf /tmp/labmap-0.8.1.tar.gz --strip-components=1 -C /opt/labmap
 ```
 
 ```bash

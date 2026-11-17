@@ -106,6 +106,9 @@ label.tog input{width:22px;height:22px;accent-color:var(--acc)}
 @media (max-width:719px){#layers{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-inline:-16px;padding-inline:16px}#layers::-webkit-scrollbar{display:none}#layers .lay{flex:none}}
 
 /* map */
+.selbar{display:flex;align-items:center;gap:8px;min-height:44px;padding:4px 0;font-size:14px;flex-wrap:wrap}
+.selbar .sp{flex:1}
+body[data-tab=map] main.wrap,body[data-tab=map] .top .wrap,body[data-tab=map] #notice .wrap{max-width:none}
 .mapwrap{overflow:auto;-webkit-overflow-scrolling:touch;height:min(68vh,760px);background:var(--panel);border:1px solid var(--line);border-radius:8px}
 svg.map{display:block;font-family:var(--mono);user-select:none;-webkit-user-select:none}
 svg.map .bg{fill:var(--panel)}
@@ -150,6 +153,8 @@ button.tag{min-height:26px}
 /* lists and cards */
 .list{display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .list>.gh{padding:6px 12px;background:var(--band);font:700 11px var(--sans);letter-spacing:.06em;text-transform:uppercase}
+.iss-row{padding:0 12px 0 0;gap:6px;flex-wrap:nowrap}
+.iss-row>button.item{border-top:0;flex:1;width:auto;min-width:0}
 .item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;min-height:48px;padding:8px 12px;border:0;border-top:1px solid var(--line2);background:none;text-align:left}
 .item:first-child{border-top:0}
 .item .nm{font:700 13px var(--mono)}
@@ -256,6 +261,7 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
         <button class="btn sm pri ed" data-act="add-link">+ Cable</button>
       </div>
     </div>
+    <div class="selbar" id="selbar"></div>
     <div class="mapwrap" id="mapwrap"><div id="map"></div></div>
     <p class="mut" id="map-hint"></p>
   </section>

@@ -98,6 +98,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(['wall-1', 'ups-1', 'strip-1', 'pdu-1'].every(n => boot.col[n] === 0) && ['sw-lab-1', 'server-lab'].every(n => boot.col[n] === 4) && boot.col['psu-01'] === 1 && boot.col['board-01'] === 2 && boot.col['unit-01'] === 2 && boot.col['usbserial-01'] === 3, 'map columns: power, supplies, devices, adapters, network');
   const maxX = c => Math.max(...cols[c].map(n => boot.x[n])), minX = c => Math.min(...cols[c].map(n => boot.x[n]));
   ok([0, 1, 2, 3].every(c => maxX(c) < minX(c + 1)), 'each column is drawn left of the next one');
+  const mq = await page.evaluate(() => { const cr = LAB.mapCrossings(); LAB.ui.sel = 'sw-lab-1'; LAB.refreshAll(); const rs = [...document.querySelectorAll('svg.map .ltag rect')].map(e => e.getBBox()); let n = 0; for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) { const a = rs[i], c = rs[j]; if (a.x < c.x + c.width && c.x < a.x + a.width && a.y < c.y + c.height && c.y < a.y + a.height) n++; } LAB.ui.sel = null; LAB.refreshAll(); return { cr, tags: rs.length, over: n }; });
+  ok(mq.cr <= 45 && mq.tags >= 20 && mq.over === 0, 'map: devices reordered to cross fewer cables (' + mq.cr + ' crossings); the ' + mq.tags + ' cable tags of a switch do not overlap');
 
   console.log('2. Routes and power');
   const routes = await page.evaluate(() => {
@@ -134,7 +136,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   console.log('4. Interaction: sheet, user, edit mode, wizards, undo');
   await page.screenshot({ path: path.join(SHOTS, 'map-390.png') });
-  await page.evaluate(() => { const g = [...document.querySelectorAll('svg.map .dev')].find(x => x.dataset.dev === 'board-01'); g.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+  const tapDev = n => page.evaluate(d => { const g = [...document.querySelectorAll('svg.map .dev')].find(x => x.dataset.dev === d); g.dispatchEvent(new MouseEvent('click', { bubbles: true })); }, n);
+  await tapDev('board-01');
+  const tap1 = await page.evaluate(() => ({ dlg: !document.getElementById('dlg-back').hidden, bar: document.getElementById('selbar').textContent, hl: document.querySelectorAll('svg.map .lk.hl').length, sel: !!document.querySelector('svg.map .dev.sel') }));
+  ok(!tap1.dlg && /^board-01/.test(tap1.bar) && /Open/.test(tap1.bar) && tap1.hl >= 5 && tap1.sel, 'map: a first tap only highlights the device and its cables, with an Open button', tap1.bar);
+  await tapDev('board-01');
   await page.waitForSelector('#dlg-back:not([hidden])');
   await page.waitForTimeout(350);
   const sheet = await page.evaluate(() => ({ t: document.getElementById('dlg-t').textContent, rows: document.querySelectorAll('#dlg-b tr.pr').length, hl: document.querySelectorAll('svg.map .lk.hl').length, fits: document.getElementById('dlg').getBoundingClientRect().bottom <= window.innerHeight + 1 && document.getElementById('dlg').getBoundingClientRect().top >= 0,
@@ -394,10 +400,56 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(await page.evaluate(() => !!document.querySelector('#dat [data-k="svg"]') && !!document.querySelector('#dat [data-k="report"]') && !document.querySelector('#dat [data-act="backups"]')), 'Data tab: Map SVG and Report HTML; no Backups in local mode');
   ok(errors.length === 0, 'no console errors', errors.join(' | '));
 
+
+  console.log('7c. Wizard: swap and mismatched ends; VLAN on a port range; map order and tags');
+  await quiet(page);
+  await page.evaluate(() => LAB.commit('test: mixed devices', s => {
+    s.devices['mix-a'] = { types: ['other'], ports: [{ name: 'eth0', kind: 'rj45' }, { name: 'usb1', kind: 'usb' }, { name: 'ac-in', kind: 'ac-in' }] };
+    s.devices['mix-b'] = { types: ['other'], ports: [{ name: 'eth0', kind: 'rj45' }, { name: 'usb1', kind: 'usb' }, { name: 'out1', kind: 'ac-out' }] };
+  }));
+  await page.evaluate(() => LAB.setTab('cables'));
+  await page.click('#t-cables [data-act="add-link"]');
+  await page.selectOption('#dlg-b select[data-f="a|dev"]', 'mix-a');
+  await page.selectOption('#dlg-b select[data-f="b|dev"]', 'mix-b');
+  const w0 = await page.evaluate(() => ({ a: document.querySelector('#dlg-b select[data-f="a|port"]').value, b: document.querySelector('#dlg-b select[data-f="b|port"]').value, bopts: [...document.querySelectorAll('#dlg-b select[data-f="b|port"] option')].map(o => o.value).filter(Boolean).join() }));
+  await page.selectOption('#dlg-b select[data-f="b|port"]', 'usb1');
+  const w1 = await page.evaluate(() => ({ a: document.querySelector('#dlg-b select[data-f="a|port"]').value, b: document.querySelector('#dlg-b select[data-f="b|port"]').value }));
+  ok(w0.a === 'eth0' && w0.b === 'eth0' && /usb1/.test(w0.bopts) && w1.a === 'usb1' && w1.b === 'usb1', 'choosing USB on one end while the other is Ethernet: the other end follows (no need to clear it first)', JSON.stringify([w0, w1]));
+  await page.click('#dlg-b [data-act="w-swap"]');
+  ok(await page.evaluate(() => document.querySelector('#dlg-b select[data-f="a|dev"]').value === 'mix-b' && document.querySelector('#dlg-b select[data-f="b|dev"]').value === 'mix-a'), '"Swap" exchanges both ends');
+  await page.click('[data-act="dlg-close"]');
+  await page.evaluate(() => LAB.commit('test: reversed power cable', s => { s.links.push({ id: 'P-990', type: 'power', a: 'mix-a:ac-in', b: 'mix-b:out1', notes: '' }); }));
+  await page.evaluate(() => LAB.setTab('issues'));
+  await quiet(page);
+  await page.click('#issues [data-act="link-swap"][data-link="P-990"]');
+  const sw = await page.evaluate(() => { const l = LAB.state.links.find(x => x.id === 'P-990'); return { a: l.a, b: l.b, iss: LAB.index.issues.some(i => i.link === 'P-990') }; });
+  ok(sw.a === 'mix-b:out1' && sw.b === 'mix-a:ac-in' && !sw.iss, 'a reversed power cable is fixed with one tap ("Swap ends" in Issues)', JSON.stringify(sw));
+  await quiet(page);
+  await page.evaluate(() => LAB.setTab('devices'));
+  await page.fill('#dq', 'pp-a');
+  await page.waitForFunction(() => document.querySelectorAll('#dev-list .item').length === 1 && document.querySelector('#dev-list .item').dataset.dev === 'pp-a');
+  await page.click('#dev-list .item');
+  await page.click('#dlg-f [data-act="vlans"]');
+  await page.selectOption('#dlg-b select[data-f="from"]', 'p2');
+  await page.selectOption('#dlg-b select[data-f="to"]', 'p5');
+  await page.selectOption('#dlg-b select[data-f="vlan"]', 'TEST-B');
+  await page.fill('#dlg-b input[data-f="tagged"]', 'TEST-A, LAB');
+  const prev = await page.evaluate(() => document.getElementById('dlg-b').textContent);
+  await page.click('#dlg-f [data-act="save"]');
+  const vr = await page.evaluate(() => ({ ps: LAB.state.devices['pp-a'].ports.map(p => p.name + '=' + (p.vlan || '') + '/' + (p.vlans || []).join('+')).join(' '), msg: LAB.state.log[LAB.state.log.length - 1].msg }));
+  ok(/4 ports: p2 … p5/.test(prev) && vr.ps === 'p1=LAB/ p2=TEST-B/TEST-A+LAB p3=TEST-B/TEST-A+LAB p4=TEST-B/TEST-A+LAB p5=TEST-B/TEST-A+LAB p6=/' && /p2…p5 \(4 ports\)/.test(vr.msg), 'VLAN on a range of ports: access and tagged VLANs on p2…p5 in one change', vr.ps);
+  await page.click('[data-act="dlg-close"]').catch(() => {});
+  await page.fill('#dq', '');
+  await quiet(page);
+  ok(errors.length === 0, 'no console errors', errors.join(' | '));
+
   console.log('8. Desktop, dark theme; home network, example button and load at scale 4');
   const desk = await open(base + '/index.html#ips', { viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
   await loadExample(desk);
   ok(await desk.evaluate(() => LAB.ui.tab === 'ips' && document.querySelectorAll('.ipg .ipc').length === 256), 'the page honours #ips');
+  const wide = await desk.evaluate(() => { LAB.ui.fit = false; LAB.ui.zoom = 1; LAB.setTab('map'); const w = document.getElementById('mapwrap'); return { fill: w.scrollWidth <= w.clientWidth + 1 && document.querySelector('#map svg').getBoundingClientRect().width >= w.clientWidth - 40, wrap: w.clientWidth }; });
+  ok(wide.fill && wide.wrap > 1200, 'on a wide screen the map takes the whole width at actual size (' + wide.wrap + ' px)');
+  await desk.evaluate(() => LAB.setTab('ips'));
   await desk.evaluate(() => { LAB.ui.fit = true; LAB.setTab('map'); });
   await desk.screenshot({ path: path.join(SHOTS, 'map-full.png'), fullPage: true });
   await desk.evaluate(() => { LAB.ui.fit = false; LAB.setTab('power'); });
