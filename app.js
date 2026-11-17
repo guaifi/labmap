@@ -71,17 +71,29 @@
    boot() draws an empty lab, then asks the server:
    · SERVER (server.py, Python 3, standard library only). State travels as the
      two YAML texts; the server does not parse YAML, it only writes atomically and
-     keeps the previous version in <data>/backups/ (data folder: --data, default
-     data-do-not-edit/ next to server.py).
-       GET  /api/state  -> { labmap, rev, lab, cat }
-       GET  /api/rev    -> { rev }                 (polled every POLL_EVERY)
-       PUT  /api/state  <- { rev, base, holder, by, msg, lab, cat }
-                        -> 200 { rev } | 409 current state if base is not the stored
-                           revision | 423 { by } if somebody else holds the lock
-       POST /api/lock   <- { holder, by, ttlMs }   (small ttlMs = release)
+     keeps the previous versions. Data folder (--data, default data-do-not-edit/):
+       catalog.yaml + backups/          shared by every site
+       sites/NAME/lab.yaml + backups/   one lab per site (lab, office, home)
+     SITES: the page works on one site (SITE, from ?site=, else the last one used,
+     else the first); api() adds ?site= to every call. Changing site reloads the
+     page. Revisions, log and edit lock are per site. The catalog is shared: it is
+     sent only when this page changed it (NET.catSent), with the catRev it started
+     from; if another site changed it meanwhile the server answers 409 and the
+     page reloads. Polling also reloads when catRev changes.
+       GET  /api/sites                 -> { sites:[{ name, rev }] }
+       POST /api/sites  <- { name }     -> { name } | 400 | 409
+       GET  /api/state?site            -> { labmap, site, rev, catRev, lab, cat }
+       GET  /api/rev?site              -> { rev, catRev }       (polled every POLL_EVERY)
+       PUT  /api/state?site  <- { rev, base, holder, by, msg, lab, cat?, catBase? }
+                        -> 200 { rev, catRev } | 409 current state if base or catBase
+                           is not the stored one | 423 { by } if somebody else holds
+                           the lock of the site | 400 { error }
+       POST /api/lock?site   <- { holder, by, ttlMs }   (small ttlMs = release)
                         -> { acquired, by, expiresAt }
-       GET  /api/backups           -> { backups:[{ file, layer, rev, time }] } newest first
-       GET  /api/backup?file=NAME  -> { file, text }
+       GET  /api/backups?site          -> { backups:[{ file, layer, rev, time }] } newest first
+       GET  /api/backup?site&file=NAME -> { file, text }
+       503 { error } when a data file is missing: the page goes read-only (it never
+       shows an empty lab that could be saved over the real one).
      A save that fails for network or server reasons (not 4xx) stays pending and
      is retried with backoff (3 s doubling, at most 30 s); the page shows "Not
      saved yet", closing it asks first, polling never overwrites pending changes
@@ -192,7 +204,7 @@
    · Undo covers the last change of this tab only.
    ============================================================================ */
 'use strict';
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 /* ---------------------------------------------------------------------------
    1. Utilities
@@ -951,7 +963,10 @@ const readData = text => upgrade(parseAny(text));
 const TAB = 't' + Math.random().toString(36).slice(2, 10);     // identifies this browser tab
 const LOG_MAX = 300, LOCK_TTL = 120000, IDLE_MAX = 600000, RENEW_EVERY = 40000, POLL_EVERY = 8000, CONNECT_MAX = 4000;
 /* mode: boot | server | offline (the server stopped answering) | local (no server) */
-const NET = { mode: 'boot', rev: 0, editing: false, lastAct: Date.now(), lastRenew: 0, saving: false, dirty: false, saveMsg: '', retry: 0, retryTimer: 0, localDirty: false, blocked: '' };
+const NET = { mode: 'boot', rev: 0, editing: false, lastAct: Date.now(), lastRenew: 0, saving: false, dirty: false, saveMsg: '', retry: 0, retryTimer: 0, localDirty: false, blocked: '', catRev: '', catSent: '', sites: [] };
+/* Sites: one lab per site, one catalog shared by all. SITE is '' in local mode. */
+let SITE = '';
+const api = path => path + (SITE ? (path.includes('?') ? '&' : '?') + 'site=' + encodeURIComponent(SITE) : '');
 const withTimeout = (p, ms, fallback) => Promise.race([Promise.resolve(p), new Promise(r => setTimeout(() => r(fallback), ms))]);
 const who = () => UI.user || 'anon';
 const holder = () => who() + ':' + TAB;
@@ -965,10 +980,29 @@ async function httpJson(method, url, body) {
 /* Ask server.py for the state. Returns false when there is no server (local mode). */
 async function connectServer() {
   try {
-    const r = await withTimeout(httpJson('GET', 'api/state'), CONNECT_MAX, null);
-    if (r && r.status === 200 && r.j && r.j.labmap) { serverLoad(r.j); setMode('server'); setInterval(poll, POLL_EVERY); return true; }
+    const l = await withTimeout(httpJson('GET', 'api/sites'), CONNECT_MAX, null);
+    if (!l || l.status !== 200 || !l.j || !Array.isArray(l.j.sites)) return false;
+    NET.sites = l.j.sites.map(x => x.name);
+    let want = '', last = '';
+    try { want = new URLSearchParams(location.search).get('site') || ''; last = localStorage.getItem('labmap.site') || ''; } catch (e) {}
+    SITE = NET.sites.includes(want) ? want : NET.sites.includes(last) ? last : NET.sites[0] || '';
+    if (want && want !== SITE) toast(`No site "${want}". Showing ${SITE}.`, { sticky: true });
+    try { localStorage.setItem('labmap.site', SITE); } catch (e) {}
+    const r = await withTimeout(httpJson('GET', api('api/state')), CONNECT_MAX, null);
+    if (!r) return false;
+    if (r.status === 200 && r.j && r.j.labmap) serverLoad(r.j);
+    else serverDown(r);
+    setMode('server'); setInterval(poll, POLL_EVERY);
+    return true;
   } catch (e) { /* no server */ }
   return false;
+}
+/* The server answers but cannot give the data (a file is missing): read-only until it can. */
+function serverDown(r) {
+  NET.blocked = 'Server: ' + ((r.j && r.j.error) || 'HTTP ' + r.status) + '. Read-only.';
+  NET.rev = -1;
+  if (NET.editing) leaveEdit();
+  showError(NET.blocked); renderHeader();
 }
 /* The state travels as the two YAML texts. */
 function serverLoad(j) {
@@ -984,19 +1018,22 @@ function serverLoad(j) {
   S = st;
   S.rev = +j.rev || 0;
   NET.rev = S.rev; NET.dirty = false; UNDO = null;
+  NET.catRev = j.catRev || ''; NET.catSent = toCatalogYaml(S.catalog);      // the catalog is sent only when it changes
   refreshAll();
 }
 async function poll() {
   try {
-    const r = await httpJson('GET', 'api/rev');
+    const r = await httpJson('GET', api('api/rev'));
+    if (r.status === 503) { if (NET.mode === 'offline') setMode('server'); if (!NET.blocked) serverDown(r); return; }
     if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status);
     if (NET.mode === 'offline') setMode('server');
-    if (NET.saving || NET.dirty || r.j.rev === NET.rev) return;      // unsaved local changes are never overwritten
-    const s = await httpJson('GET', 'api/state');
-    if (s.status !== 200 || !s.j || NET.saving || NET.dirty || s.j.rev === NET.rev) return;
+    if (NET.saving || NET.dirty || (r.j.rev === NET.rev && r.j.catRev === NET.catRev)) return;      // unsaved local changes are never overwritten
+    const s = await httpJson('GET', api('api/state'));
+    if (s.status === 503) return serverDown(s);
+    if (s.status !== 200 || !s.j || NET.saving || NET.dirty || (s.j.rev === NET.rev && s.j.catRev === NET.catRev)) return;
     const was = S.rev, ed = NET.editing;
     serverLoad(s.j);
-    if (ed) toast(`Changed by another user (rev ${was} → ${s.j.rev}). Reloaded.`, { sticky: true });
+    if (ed) toast(s.j.rev === was ? 'Catalog changed from another site. Reloaded.' : `Changed by another user (rev ${was} → ${s.j.rev}). Reloaded.`, { sticky: true });
   } catch (e) { if (NET.mode === 'server') setMode('offline'); }
 }
 /* Save: one write at a time; changes made while writing are sent in the next round.
@@ -1014,12 +1051,15 @@ async function pump() {
     while (NET.dirty) {
       NET.dirty = false;
       const rev = S.rev;
-      const r = await httpJson('PUT', 'api/state', { rev, base: NET.rev, holder: holder(), by: who(), msg: (S.log[S.log.length - 1] || {}).msg || '', lab: toYaml(S, true), cat: toCatalogYaml(S.catalog) });
+      const cy = toCatalogYaml(S.catalog), body = { rev, base: NET.rev, holder: holder(), by: who(), msg: (S.log[S.log.length - 1] || {}).msg || '', lab: toYaml(S, true) };
+      if (cy !== NET.catSent) { body.cat = cy; body.catBase = NET.catRev; }     // shared by every site: sent only when changed here
+      const r = await httpJson('PUT', api('api/state'), body);
       if (r.status === 409 && r.j) { serverLoad(r.j); toast(`Someone saved first (rev ${r.j.rev}). Reloaded: repeat the change.`, { sticky: true }); break; }
       if (r.status === 423) { NET.rev = -1; leaveEdit('Lock lost. Editing: ' + ((r.j && r.j.by) || 'another user') + '.'); poll(); break; }
       if (r.status >= 400 && r.status < 500) { const e = new Error('HTTP ' + r.status + (r.j && r.j.error ? ': ' + r.j.error : '')); e.fatal = true; throw e; }
       if (r.status !== 200) throw new Error('HTTP ' + r.status);
       NET.rev = rev;
+      if (r.j && r.j.catRev) { NET.catRev = r.j.catRev; NET.catSent = cy; }
     }
     NET.saveMsg = ''; NET.retry = 0;
     if (NET.mode === 'offline') NET.mode = 'server';
@@ -1032,7 +1072,7 @@ async function pump() {
 const unsaved = () => NET.dirty || NET.saving || (NET.mode === 'local' && NET.localDirty);
 /* Edit lock: { acquired, by, expiresAt }. A small ttlMs releases it. */
 async function lockCall(ttlMs) {
-  const r = await httpJson('POST', 'api/lock', { holder: holder(), by: who(), ttlMs });
+  const r = await httpJson('POST', api('api/lock'), { holder: holder(), by: who(), ttlMs });
   if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status);
   return r.j;
 }
@@ -1046,8 +1086,9 @@ async function enterEdit() {
   try {
     const r = await lockCall(LOCK_TTL);
     if (!r.acquired) return toast(`Editing: ${r.by || 'another user'}. Locked until ${r.expiresAt ? new Date(r.expiresAt).toLocaleTimeString() : 'about 2 min'}.`, { sticky: true });
-    const s = await httpJson('GET', 'api/state');                   // always start from the latest
-    if (s.status === 200 && s.j && s.j.rev !== NET.rev) serverLoad(s.j);
+    const s = await httpJson('GET', api('api/state'));              // always start from the latest
+    if (s.status === 200 && s.j && (s.j.rev !== NET.rev || s.j.catRev !== NET.catRev)) serverLoad(s.j);
+    if (NET.blocked) return toast(NET.blocked, { sticky: true });
     NET.lastRenew = Date.now();
     startEdit();
   } catch (e) { toast('Lock not available (' + ((e && e.message) || e) + ').', { sticky: true }); }
@@ -1140,6 +1181,13 @@ function refreshAll() { reindex(); fillLists(); renderHeader(); renderTab(); ren
 function renderHeader() {
   if (!IX) return;
   $('#ver').textContent = 'v' + VERSION;
+  const ss = $('#site');
+  ss.hidden = !SITE;
+  if (SITE && ss.dataset.k !== NET.sites.join() + '|' + SITE) {
+    ss.dataset.k = NET.sites.join() + '|' + SITE;
+    ss.innerHTML = NET.sites.map(n => opt(n, n, SITE)).join('') + opt('+', '+ New site', '');
+    document.title = 'Labmap · ' + SITE;
+  }
   const st = $('#st-store');
   const M = { boot: ['starting…', ''], offline: ['offline', 'warn'], local: ['local · rev ' + S.rev, 'warn'], server: ['server · rev ' + S.rev + (NET.saveMsg ? ' · ' + NET.saveMsg : ''), NET.saveMsg === 'not saved' ? 'err' : 'ok'] }[NET.mode];
   st.textContent = M[0];
@@ -1502,11 +1550,11 @@ function renderCatalog() {
 }
 
 function renderData() {
-  const mode = { server: 'Server (data-do-not-edit/)', local: 'Local, not saved', offline: 'Offline', boot: 'Starting…' }[NET.mode];
+  const mode = { server: 'Server', local: 'Local, not saved', offline: 'Offline', boot: 'Starting…' }[NET.mode];
   let h = '<div class="cards">';
   h += `<div class="card"><h4>Lab</h4><p class="mut">${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')} · ${plural(Object.keys(S.vlans).length, 'VLAN')}</p><div class="row"><button class="btn" data-act="export" data-k="lab">Export</button><button class="btn ed" data-act="import" data-k="lab">Import</button><button class="btn ed" data-act="example">Load example</button></div><div class="row" style="margin-top:8px"><button class="btn sm" data-act="export" data-k="svg">Map SVG</button><button class="btn sm" data-act="export" data-k="report">Report HTML</button>${NET.mode === 'server' ? '<button class="btn sm" data-act="backups">Backups</button>' : ''}</div></div>`;
   h += `<div class="card"><h4>Catalog</h4><p class="mut">${plural(Object.keys(CAT.templates).length, 'template')} · ${plural(Object.keys(CAT.portTypes).length, 'port type')}</p><div class="row"><button class="btn" data-act="export" data-k="cat">Export</button><button class="btn ed" data-act="import" data-k="cat">Import</button></div></div></div>`;
-  h += `<dl class="kv" style="margin-top:14px"><dt>Storage</dt><dd>${mode}</dd><dt>Revision</dt><dd>${S.rev}</dd><dt>User</dt><dd><b class="mono">${esc(UI.user || '—')}</b> <button class="btn sm" data-act="user">Change</button></dd><dt>Version</dt><dd>${VERSION}</dd></dl>`;
+  h += `<dl class="kv" style="margin-top:14px"><dt>Storage</dt><dd>${mode}</dd>${SITE ? `<dt>Site</dt><dd><b class="mono">${esc(SITE)}</b> <span class="mut">of ${NET.sites.length}</span> <button class="btn sm" data-act="site-new">New site</button></dd>` : ''}<dt>Revision</dt><dd>${S.rev}</dd><dt>User</dt><dd><b class="mono">${esc(UI.user || '—')}</b> <button class="btn sm" data-act="user">Change</button></dd><dt>Version</dt><dd>${VERSION}</dd></dl>`;
   const log = S.log.slice().reverse();
   h += `<h3>Change log (${log.length})</h3><div class="list">`;
   for (const e of log.slice(0, UI.logN)) h += `<div class="item"><span class="mono">rev ${esc(e.rev)}</span><span>${esc(e.by || '?')}</span><span class="sp mut" style="font-size:12px">${esc(fmtTime(e.t))}</span><span class="sub" style="color:var(--ink)">${esc(e.msg)}</span></div>`;
@@ -1568,6 +1616,31 @@ function userDlg(next) {
       try { localStorage.setItem('labmap.user', a); } catch (e) {}
       closeDlg(); renderTab();
       if (next) next();
+    } }
+  });
+}
+
+/* ---------- Sites ---------- */
+function goSite(name) {
+  if (!name || name === SITE) return;
+  if (unsaved()) return toast('Not saved yet. Wait before changing site.', { sticky: true });
+  if (NET.editing) leaveEdit();
+  try { localStorage.setItem('labmap.site', name); } catch (e) {}
+  location.search = '?site=' + encodeURIComponent(name);            // a clean start on the other site
+}
+function siteNewDlg() {
+  if (!UI.user) return userDlg(() => siteNewDlg());
+  const w = { name: '' };
+  openDlg({
+    title: 'New site',
+    body: () => fld('Name: lower case, digits and "-"', inp('name', w.name, 'placeholder="office-2" autocapitalize="off" autocorrect="off"')) + '<p class="mut">Empty lab. The catalog is shared.</p>',
+    foot: () => '<button class="btn" data-act="dlg-back">Cancel</button><button class="btn pri" data-act="save">Create</button>',
+    set(f, v) { w[f] = v; },
+    on: { save: async () => {
+      const name = String(w.name || '').trim().toLowerCase();
+      const r = await httpJson('POST', 'api/sites', { name, by: who() }).catch(() => ({ status: 0, j: null }));
+      if (r.status !== 200) return toast((r.j && r.j.error) || 'Not created (HTTP ' + r.status + ').', { sticky: true });
+      closeDlg(true); goSite(r.j.name);
     } }
   });
 }
@@ -2085,14 +2158,15 @@ function reportHtml() {
   const cabs = S.links.slice().sort((a, b) => natCmp(a.id, b.id)).map(l => [l.id, LAYERS[linkLayer(l)].label, l.a, l.b, l.notes]);
   const vl = Object.keys(S.vlans).sort(natCmp).map(v => { const x = S.vlans[v], c = parseCidr(x.subnet); return [v, x.id == null ? '' : x.id, x.subnet || '', c ? maskOf(c) : '', x.gateway || '', x.dns || '', x.notes || '']; });
   const notes = S.ipUse.map(e => [e.vlan || '', e.from + (e.to ? '–' + e.to : ''), e.who || '', e.iface || '', e.notes || '']);
-  return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>Labmap report · rev ' + S.rev + '</title><style>body{font:13px system-ui,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0}h2{font-size:15px;margin:28px 0 8px}p{color:#555}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}th{background:#eee}svg{max-width:100%;height:auto}@media print{body{margin:0}h2{break-after:avoid}tr{break-inside:avoid}}</style></head><body>' +
-    `<h1>Labmap report</h1><p>rev ${S.rev} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC · ${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')}</p>` +
+  return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>Labmap report · ' + (SITE ? esc(SITE) + ' · ' : '') + 'rev ' + S.rev + '</title><style>body{font:13px system-ui,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0}h2{font-size:15px;margin:28px 0 8px}p{color:#555}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}th{background:#eee}svg{max-width:100%;height:auto}@media print{body{margin:0}h2{break-after:avoid}tr{break-inside:avoid}}</style></head><body>' +
+    `<h1>Labmap report${SITE ? ' · ' + esc(SITE) : ''}</h1><p>rev ${S.rev} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC · ${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')}</p>` +
     '<h2>Map</h2>' + exportMapSvg() + '<h2>Devices</h2>' + table(['Name', 'Type', 'Project', 'Model', 'Serial', 'Location', 'Owner', 'IPs', 'Switched by', 'Notes'], devs) +
     '<h2>Cables</h2>' + table(['Id', 'Layer', 'From', 'To', 'Notes'], cabs) + '<h2>VLANs</h2>' + table(['Name', 'Id', 'Subnet', 'Netmask', 'Gateway', 'DNS', 'Notes'], vl) +
     '<h2>IP notes</h2>' + table(['VLAN', 'Address', 'User', 'Interface', 'Notes'], notes) + '</body></html>\n';
 }
 function exportDlg(kind) {
-  const make = { lab: () => [LAYER_FILE.lab, toYaml(S)], cat: () => [LAYER_FILE.cat, toCatalogYaml(S.catalog)], labels: () => ['cable-labels.csv', labelsCsv(shownCables())], svg: () => ['labmap.svg', exportMapSvg()], report: () => ['labmap-report.html', reportHtml()] }[kind];
+  const pre = SITE ? SITE + '-' : '';
+  const make = { lab: () => [pre + LAYER_FILE.lab, toYaml(S)], cat: () => [LAYER_FILE.cat, toCatalogYaml(S.catalog)], labels: () => [pre + 'cable-labels.csv', labelsCsv(shownCables())], svg: () => [pre + 'map.svg', exportMapSvg()], report: () => [pre + 'report.html', reportHtml()] }[kind];
   if (!make) return;
   if (kind === 'lab') NET.localDirty = false;
   const f = make();
@@ -2101,18 +2175,19 @@ function exportDlg(kind) {
 /* Backups kept by the server: list, look, restore (as a normal, undoable change). */
 const backupTime = t => String(t).replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)$/, '$1-$2-$3 $4:$5:$6');
 async function backupText(file) {
-  const r = await httpJson('GET', 'api/backup?file=' + encodeURIComponent(file));
+  const r = await httpJson('GET', api('api/backup?file=' + encodeURIComponent(file)));
   if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status);
   return r.j.text;
 }
+const backupName = b => (b.rev == null ? '' : 'rev ' + b.rev + ', ') + backupTime(b.time);
 function restoreBackup(b, text) {
-  confirmDlg(`Restore the ${b.layer} as it was at rev ${b.rev} (${backupTime(b.time)})?`, () => {
+  confirmDlg(`Restore the ${b.layer} as it was (${backupName(b)})?${b.layer === 'catalog' ? ' The catalog is shared by every site.' : ''}`, () => {
     try {
       const obj = readData(text);
-      if (b.layer === 'catalog') { const c = normCatalog(obj); if (!Object.keys(c.portTypes).length) throw new Error('portTypes missing'); if (commit(`Catalog restored from the backup of rev ${b.rev}`, s => { s.catalog = c; })) closeDlg(true); return; }
+      if (b.layer === 'catalog') { const c = normCatalog(obj); if (!Object.keys(c.portTypes).length) throw new Error('portTypes missing'); if (commit(`Catalog restored from the backup of ${backupName(b)}`, s => { s.catalog = c; })) closeDlg(true); return; }
       obj.catalog = clone(S.catalog);
       const st = normalize(obj);
-      if (commit(`Lab restored from the backup of rev ${b.rev}`, s => { for (const k of ['vlans', 'devices', 'links', 'ipUse']) s[k] = st[k]; })) { UI.sel = UI.selLink = null; UI.project = ''; closeDlg(true); renderTab(); }
+      if (commit(`Lab restored from the backup of ${backupName(b)}`, s => { for (const k of ['vlans', 'devices', 'links', 'ipUse']) s[k] = st[k]; })) { UI.sel = UI.selLink = null; UI.project = ''; closeDlg(true); renderTab(); }
     } catch (e) { toast('Backup not readable (' + e.message + ').', { sticky: true }); }
   }, 'Restore', true);
 }
@@ -2124,7 +2199,7 @@ function backupsDlg() {
       if (w.err) return `<div class="iss err"><b>Error</b><span>${esc(w.err)}</span></div>`;
       if (!w.list) return '<p class="mut">Loading…</p>';
       if (!w.list.length) return '<p class="mut">No backups yet.</p>';
-      return '<div class="list">' + w.list.map((b, i) => `<div class="item"><span class="chip">${esc(b.layer)}</span><span class="mono">rev ${esc(b.rev)}</span><span class="sp mut" style="font-size:12px">${esc(backupTime(b.time))}</span><span class="sub"><button class="btn sm" data-act="view" data-i="${i}">View</button> <button class="btn sm ed" data-act="restore" data-i="${i}">Restore</button></span></div>`).join('') + '</div>';
+      return '<div class="list">' + w.list.map((b, i) => `<div class="item"><span class="chip">${esc(b.layer)}</span><span class="mono">${b.rev == null ? '' : 'rev ' + esc(b.rev)}</span><span class="sp mut" style="font-size:12px">${esc(backupTime(b.time))}</span><span class="sub"><button class="btn sm" data-act="view" data-i="${i}">View</button> <button class="btn sm ed" data-act="restore" data-i="${i}">Restore</button></span></div>`).join('') + '</div>';
     },
     on: {
       view: async el => { const b = w.list[+el.dataset.i]; try { fileDlg(b.file, await backupText(b.file)); } catch (e) { toast('Backup not available (' + e.message + ').', { sticky: true }); } },
@@ -2132,7 +2207,7 @@ function backupsDlg() {
     }
   };
   openDlg(dlg);
-  httpJson('GET', 'api/backups').then(r => { if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status); w.list = r.j.backups || []; }).catch(e => { w.err = 'Backups not available (' + e.message + ').'; }).then(() => { if (topDlg() === dlg) renderDlg(); });
+  httpJson('GET', api('api/backups')).then(r => { if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status); w.list = r.j.backups || []; }).catch(e => { w.err = 'Backups not available (' + e.message + ').'; }).then(() => { if (topDlg() === dlg) renderDlg(); });
 }
 function catEditDlg() {
   const w = { text: toCatalogYaml(S.catalog) };
@@ -2235,6 +2310,7 @@ const ACT = {
   'cat-edit': () => catEditDlg(),
   'tpl-del': el => { const k = el.dataset.k; if (CAT.templates[k]) commit(`Template ${k} deleted`, s => { delete s.catalog.templates[k]; }); },
   user: () => userDlg(),
+  'site-new': () => siteNewDlg(),
   example: () => loadExample(),
   undo: () => undo(),
   'toast-x': () => hideToast(),
@@ -2285,6 +2361,7 @@ function wire() {
     if (el.id === 'f-proj') { UI.project = el.value; UI.sel = UI.selLink = null; renderMapTab(); const w = $('#mapwrap'); w.scrollTop = 0; w.scrollLeft = 0; }
     else if (el.id === 'd-type') { UI.dtype = el.value; renderDevices(); }
     else if (el.id === 'c-layer') { UI.clayer = el.value; renderCables(); }
+    else if (el.id === 'site') { const v = el.value; el.value = SITE; if (v === '+') siteNewDlg(); else goSite(v); }
   });
   document.addEventListener('keydown', e => { NET.lastAct = Date.now(); if (e.key === 'Escape' && topDlg()) closeDlg(); });
   document.addEventListener('pointerdown', () => { NET.lastAct = Date.now(); }, { passive: true });
@@ -2292,7 +2369,7 @@ function wire() {
   window.addEventListener('beforeunload', e => { if (unsaved()) { e.preventDefault(); e.returnValue = ''; } });      // ask before losing unsaved changes
   window.addEventListener('pagehide', () => {                                      // release the lock when the page closes
     if (!NET.editing || NET.mode === 'local') return;
-    try { navigator.sendBeacon('api/lock', new Blob([JSON.stringify({ holder: holder(), by: who(), ttlMs: 1000 })], { type: 'application/json' })); } catch (e) {}
+    try { navigator.sendBeacon(api('api/lock'), new Blob([JSON.stringify({ holder: holder(), by: who(), ttlMs: 1000 })], { type: 'application/json' })); } catch (e) {}
   });
 }
 
@@ -2318,7 +2395,7 @@ async function boot() {
 
 /* Pure functions in view: for tests, for the console and for tools/ (Node). */
 const API = {
-  VERSION, get state() { return S; }, get index() { return IX; }, get net() { return NET; }, get ui() { return UI; },
+  VERSION, get site() { return SITE; }, get state() { return S; }, get index() { return IX; }, get net() { return NET; }, get ui() { return UI; },
   layerOf, powerDir, isNetKind, kindKey, mapCol, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
   FORMAT, toYaml, toCatalogYaml, parseYaml, readData, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
   /* load a lab without edit mode or saving (tests and console) */

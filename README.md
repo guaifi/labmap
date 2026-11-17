@@ -19,6 +19,7 @@ uses. One web page, one small Python server, two YAML files. No dependencies.
 - **Validation** that never blocks: duplicate IP or MAC, cable to a missing port,
   mismatched port types, device with no power cable.
 - **Catalog** of port types and device templates, editable from the page.
+- **Several sites** (labs, offices, home) on one server, sharing the catalog.
 - **Edit lock**, change log, undo, and backups you can restore from the page. A save
   that fails while the server is down is kept and retried. Works on a phone.
 
@@ -28,7 +29,7 @@ Needs Python 3.7 or later (Linux, Windows or macOS). Nothing else to install. Pi
 released version from the [tags](https://github.com/guaifi/labmap/tags):
 
 ```bash
-git clone --branch v0.6.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+git clone --branch v0.7.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
 ```
 
 ```bash
@@ -38,7 +39,7 @@ python3 /opt/labmap/server.py --port 8080
 Without Git, download the archive of that version instead:
 
 ```bash
-mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.6.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
+mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.7.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
 ```
 
 Open `http://<host>:8080`. Press **Edit**, type a user name, add devices and cables.
@@ -53,14 +54,26 @@ expose it to the Internet.
 | Layer   | Files                              | Contents                                   |
 |---------|------------------------------------|--------------------------------------------|
 | Web     | `index.html`, `app.js`, `server.py` | Code. Knows nothing about concrete devices. |
-| Catalog | `data-do-not-edit/catalog.yaml`     | Port types and device templates.            |
-| Lab     | `data-do-not-edit/lab.yaml`         | Devices, cables, VLANs, IP notes, change log. |
+| Catalog | `data-do-not-edit/catalog.yaml`     | Port types and device templates, shared by every site. |
+| Lab     | `data-do-not-edit/sites/NAME/lab.yaml` | One per site: devices, cables, VLANs, IP notes, change log. |
 
-`data-do-not-edit/` is the database. The server creates it on first run (the catalog
-is copied from `defaults/catalog.yaml`) and it is git-ignored. Do not edit those files
-by hand: change them from the page. To keep it somewhere else (another disk, a synced
-folder), start the server with `--data /path/to/folder`. Each layer has its own **Export** and **Import**
-(add or replace) in the Data and Catalog tabs.
+`data-do-not-edit/` is the database. The server creates it on first run with one site
+(`--site NAME`, default `main`) and the catalog copied from `defaults/catalog.yaml`. It
+is git-ignored. Do not edit those files by hand: change them from the page. To keep it
+somewhere else (another disk, a synced folder), start the server with
+`--data /path/to/folder`. Each layer has its own **Export** and **Import** (add or
+replace) in the Data and Catalog tabs.
+
+## Sites
+
+One server can document several sites (labs, offices, home). Each site has its own
+lab, revisions, change log and edit lock; the catalog of port types and templates is
+shared, so a device model defined once is available everywhere. The site menu next to
+the title switches site and creates new ones (**+ New site**). A link can point straight
+to a site: `http://<host>:8080/?site=office-2`.
+
+Sites are not connected to each other: cables join ports of the same site. To rename or
+remove a site, stop the server and rename or move its folder in `sites/`.
 
 ## Update
 
@@ -68,7 +81,7 @@ The code and the data are separate, so updating never touches the data. With Git
 to the version you want (or back to the previous one):
 
 ```bash
-cd /opt/labmap && git fetch --depth 1 origin tag v0.6.1 && git checkout v0.6.1
+cd /opt/labmap && git fetch --depth 1 origin tag v0.7.1 && git checkout v0.7.1
 ```
 
 ```bash
@@ -77,11 +90,39 @@ sudo systemctl restart labmap
 
 Without Git, extract the new archive over the old folder (the data folder is not in the
 archive, so it is kept), then restart. If the data lives outside with `--data`, the code
-folder can simply be deleted and replaced. The version in use is shown next to the title.
+folder can simply be deleted and replaced. The version in use is shown next to the title. Coming from 0.6 or earlier, the server
+moves the single `lab.yaml` into `sites/<--site>/` on its first start.
 
 New templates or port types from a newer `defaults/catalog.yaml` are not applied to an
 existing installation automatically: import that file in **Catalog > + Template or
 type** (mode "Add").
+
+## Run on a Mac
+
+macOS has Python 3 once the command line tools are installed (`xcode-select --install`;
+the first `python3` asks for them). Code anywhere, data in a folder of your choice, only
+reachable from this Mac:
+
+```bash
+git clone --branch v0.7.0 --depth 1 https://github.com/guaifi/labmap.git ~/labmap
+```
+
+```bash
+python3 ~/labmap/server.py --host 127.0.0.1 --site home --data ~/Library/Mobile\ Documents/com~apple~CloudDocs/Labmap
+```
+
+Open `http://localhost:8080`. Stop it with Ctrl+C.
+
+The data folder in iCloud Drive is synced to your other devices and to iCloud, which
+protects you from losing the Mac. Some care:
+
+- Run only one server per data folder at a time (not one on each Mac).
+- Keep the folder downloaded: in Finder, right-click it and choose **Keep Downloaded**
+  (or turn off **Optimize Mac Storage**). If a file is not on the Mac the server refuses
+  to start, and if one vanishes while it runs the page turns read-only; it never saves
+  an empty lab over the real one.
+- Sync is not history: a wrong change is synced too. The `backups/` folders (inside the
+  data folder, so also in iCloud) and Time Machine give you the history.
 
 ## Run as a service (Linux)
 
@@ -94,7 +135,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/labmap
-ExecStart=/usr/bin/python3 /opt/labmap/server.py --port 8080 --data /var/lib/labmap
+ExecStart=/usr/bin/python3 /opt/labmap/server.py --port 8080 --data /var/lib/labmap --site lab-1
 Restart=always
 User=labmap
 
@@ -110,8 +151,9 @@ sudo systemctl enable --now labmap
 
 ## Backups and privacy
 
-Every save keeps the previous version in `backups/` inside the data folder: the last
-300 per file and, older than that, the last one of each day. **Data > Backups** lists them; **Restore** brings one back as a normal
+Every save keeps the previous version in a `backups/` folder next to the file (the
+catalog in the data folder, each lab in its site folder): the last 300 per file and,
+older than that, the last one of each day. **Data > Backups** lists them; **Restore** brings one back as a normal
 change (logged, with Undo). The change log inside `lab.yaml` keeps the last 300 changes.
 
 The data holds IPs, MACs, serial numbers and admin URLs: treat it as sensitive.
@@ -134,8 +176,8 @@ rsync -a /opt/labmap/data-do-not-edit/ /mnt/backup/labmap/
 cd /opt/labmap/data-do-not-edit && git add -A && git commit -qm "backup $(date +%F)" && git push -q
 ```
 
-To restore by hand: stop the service, copy a file from `backups/` over `lab.yaml` or
-`catalog.yaml`, start it again.
+To restore by hand: stop the service, copy a file from a `backups/` folder over the
+`lab.yaml` of that site or over `catalog.yaml`, start it again.
 
 ## Data format
 
