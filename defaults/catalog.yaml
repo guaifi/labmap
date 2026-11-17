@@ -12,6 +12,7 @@
 #   alias   other spellings; they are converted to the key
 # templates: device templates for the wizard. ports: one line per port, "name type".
 #   meta    optional, data each port inherits: { vlan, services, notes }
+format: 1
 portTypes:
   iface: { label: "Logical interface, no cable", layer: net, name: mgmt, net: true, virtual: true, alias: [virtual, logical] }
   rj45: { label: Ethernet RJ45, layer: net, name: "eth{n}", first: 0, net: true, alias: [eth, ethernet, net, lan, gbe] }

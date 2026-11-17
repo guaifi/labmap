@@ -7,7 +7,7 @@ Serves the web page (index.html, app.js) and stores the data in data-do-not-edit
 (or in the folder given with --data, e.g. on another disk):
     data-do-not-edit/lab.yaml       devices, cables, VLANs, IPs and change log
     data-do-not-edit/catalog.yaml   port types and device templates
-    data-do-not-edit/backups/       the previous version of every save
+    data-do-not-edit/backups/       the previous version of every save (last 300, then one per day)
 
 The data folder is created on first run (catalog copied from defaults/catalog.yaml)
 and is git-ignored: updating the code never touches it. Never publish it.
@@ -42,7 +42,7 @@ BACKUP_RE = re.compile(r'^(lab|catalog)-rev(\d{6,})-(\d{8}T\d{6})\.yaml$')
 DEFAULT_CAT = os.path.join(BASE, 'defaults', 'catalog.yaml')
 MAX_BACKUPS = 300
 MAX_BODY = 20 * 1024 * 1024
-EMPTY_LAB = '# LABMAP DATABASE · lab\n# DO NOT EDIT BY HAND: change it from the web page.\nrev: 0\nvlans:\ndevices:\nlinks: []\nipUse: []\nlog: []\n'
+EMPTY_LAB = '# LABMAP DATABASE · lab\n# DO NOT EDIT BY HAND: change it from the web page.\nrev: 0\nformat: 1\nvlans:\ndevices:\nlinks: []\nipUse: []\nlog: []\n'
 # The only files served besides the API. Everything else is 404.
 STATIC = {
     '/': ('index.html', 'text/html; charset=utf-8'),
@@ -77,6 +77,11 @@ def rev_of(text):
     return int(m.group(1)) if m else 0
 
 
+def format_of(text):
+    m = re.search(r'^format:\s*(\d+)', text, re.M)
+    return int(m.group(1)) if m else 1
+
+
 def write_atomic(path, text):
     """Temporary file in the same folder, then rename."""
     tmp = path + '.tmp'
@@ -95,9 +100,15 @@ def backup(path, rev):
     name = os.path.splitext(os.path.basename(path))[0]
     stamp = datetime.datetime.now().strftime('%Y%m%dT%H%M%S')
     shutil.copy2(path, os.path.join(BACKUPS, '%s-rev%06d-%s.yaml' % (name, rev, stamp)))
-    old = sorted(f for f in os.listdir(BACKUPS) if f.startswith(name + '-rev'))
-    for f in old[:-MAX_BACKUPS]:
-        os.remove(os.path.join(BACKUPS, f))
+    # the last MAX_BACKUPS are kept; older ones only the last of each day, so a busy
+    # day of editing never wipes out the previous days
+    old = sorted(f for f in os.listdir(BACKUPS) if BACKUP_RE.fullmatch(f) and f.startswith(name + '-rev'))
+    days = {BACKUP_RE.fullmatch(f).group(3)[:8] for f in old[-MAX_BACKUPS:]}
+    for f in reversed(old[:-MAX_BACKUPS]):
+        day = BACKUP_RE.fullmatch(f).group(3)[:8]
+        if day in days:
+            os.remove(os.path.join(BACKUPS, f))
+        days.add(day)
 
 
 def backups():
@@ -205,9 +216,12 @@ class Handler(BaseHTTPRequestHandler):
             current = state()
             if b.get('base') != current['rev']:
                 return self.json(409, current)
+            cat = b.get('cat')
+            # a page still running older code must not rewrite newer data with less
+            if format_of(b['lab']) < format_of(current['lab']) or (isinstance(cat, str) and current['cat'] and format_of(cat) < format_of(current['cat'])):
+                return self.json(400, {'error': 'older data format: reload the page'})
             backup(LAB, current['rev'])
             write_atomic(LAB, b['lab'])
-            cat = b.get('cat')
             if isinstance(cat, str) and 'portTypes:' in cat and cat != current['cat']:
                 backup(CAT, current['rev'])
                 write_atomic(CAT, cat)

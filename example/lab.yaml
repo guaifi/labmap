@@ -1,7 +1,8 @@
 # LABMAP DATABASE · lab: devices, cables, VLANs, IPs and change log
 # DO NOT EDIT BY HAND: change it from the web page. This file is the stored copy.
-# Labmap 0.5.0 · rev 1
+# Labmap 0.6.0 · rev 1
 rev: 1
+format: 1
 vlans:
   LAN: { id: 1, subnet: "192.168.1.0/24", gateway: "192.168.1.1", dns: "192.168.1.1", scope: local, notes: The only network here. }
 devices:

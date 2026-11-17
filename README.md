@@ -28,7 +28,7 @@ Needs Python 3.7 or later (Linux, Windows or macOS). Nothing else to install. Pi
 released version from the [tags](https://github.com/guaifi/labmap/tags):
 
 ```bash
-git clone --branch v0.5.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+git clone --branch v0.6.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
 ```
 
 ```bash
@@ -38,7 +38,7 @@ python3 /opt/labmap/server.py --port 8080
 Without Git, download the archive of that version instead:
 
 ```bash
-mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.5.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
+mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.6.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
 ```
 
 Open `http://<host>:8080`. Press **Edit**, type a user name, add devices and cables.
@@ -68,7 +68,7 @@ The code and the data are separate, so updating never touches the data. With Git
 to the version you want (or back to the previous one):
 
 ```bash
-cd /opt/labmap && git fetch --depth 1 origin tag v0.5.1 && git checkout v0.5.1
+cd /opt/labmap && git fetch --depth 1 origin tag v0.6.1 && git checkout v0.6.1
 ```
 
 ```bash
@@ -110,8 +110,8 @@ sudo systemctl enable --now labmap
 
 ## Backups and privacy
 
-Every save keeps the previous version in `backups/` inside the data folder (last 300
-per file). **Data > Backups** lists them; **Restore** brings one back as a normal
+Every save keeps the previous version in `backups/` inside the data folder: the last
+300 per file and, older than that, the last one of each day. **Data > Backups** lists them; **Restore** brings one back as a normal
 change (logged, with Undo). The change log inside `lab.yaml` keeps the last 300 changes.
 
 The data holds IPs, MACs, serial numbers and admin URLs: treat it as sensitive.
@@ -136,6 +136,15 @@ cd /opt/labmap/data-do-not-edit && git add -A && git commit -qm "backup $(date +
 
 To restore by hand: stop the service, copy a file from `backups/` over `lab.yaml` or
 `catalog.yaml`, start it again.
+
+## Data format
+
+`lab.yaml` and `catalog.yaml` are plain, standard YAML: any YAML library (Python's
+PyYAML, for example) reads them, so the data is never locked into this tool. Both carry
+`format: 1`. New optional fields do not change the format. If a future version ever
+needs a different layout, it converts older files by itself when it reads them; a
+version that finds data newer than it understands opens it read-only and never writes
+over it.
 
 ## Concepts
 

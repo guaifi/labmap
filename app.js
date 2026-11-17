@@ -87,6 +87,13 @@
      saved yet", closing it asks first, polling never overwrites pending changes
      and leaving edit mode keeps the lock until the save goes through.
      Restoring a backup (Data > Backups) is an ordinary commit: logged, undoable.
+     Data the page cannot read (bad YAML, newer FORMAT) puts it in read-only mode
+     (NET.blocked): it never enters edit mode, so it never saves over that data.
+     The server also refuses a save whose format is older than the stored one.
+   · FILE FORMAT: both files carry "format: N" (see FORMAT, UPGRADE, readData). Read
+     the rules next to FORMAT before changing what is written. Both files are
+     standard YAML (a test checks a round trip of awkward text), so any YAML
+     library can read them to convert or audit the data.
      The lock lasts LOCK_TTL (2 min) and is renewed every RENEW_EVERY while edit
      mode stays open; edit mode closes itself after IDLE_MAX (10 min) idle.
    · NO SERVER (page opened from static hosting): local in-memory mode with a
@@ -105,7 +112,7 @@
      Map layout .......................... MAP (sizes), buildMap(), mapSvg()
      Exports (SVG, report, labels CSV) ... exportMapSvg(), reportHtml(), labelsCsv()
      IP grid and proposals ............... ipInfo(), freeIp(), renderIps()
-     YAML format ......................... toYaml(), toCatalogYaml(), parseYaml()
+     YAML format and its version ......... toYaml(), toCatalogYaml(), parseYaml(), FORMAT, UPGRADE
      Persistence and lock ................ section 12 (NET) and server.py
 
    7. DESIGN DECISIONS
@@ -175,7 +182,8 @@
      must never go to a public repository.
    · The YAML reader understands what this tool writes (see parseYaml): no block
      scalars (| and >), no anchors, no multi-line { } or [ ].
-   · The log keeps the last LOG_MAX entries; backups keep the last 300 versions.
+   · The log keeps the last LOG_MAX entries; backups keep the last 300 versions
+     and, older than that, the last one of each day.
    · IPv4 only.
    · The map does not minimise crossings: with hundreds of cables use layers, the
      project filter or select a device. A full change (reindex, validate, redraw)
@@ -184,7 +192,7 @@
    · Undo covers the last change of this tab only.
    ============================================================================ */
 'use strict';
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 /* ---------------------------------------------------------------------------
    1. Utilities
@@ -758,7 +766,7 @@ const YAML_HEAD = what => ['# LABMAP DATABASE · ' + what, '# DO NOT EDIT BY HAN
 function toYaml(st, noDate) {
   const L = YAML_HEAD('lab: devices, cables, VLANs, IPs and change log');
   L.push('# Labmap ' + VERSION + (noDate ? '' : ' · exported ' + new Date().toISOString()) + ' · rev ' + st.rev);
-  L.push('rev: ' + st.rev);
+  L.push('rev: ' + st.rev, 'format: ' + FORMAT);
   L.push('vlans:');
   for (const v of Object.keys(st.vlans).sort(natCmp)) L.push('  ' + yamlStr(v) + ': ' + yamlFlow(st.vlans[v], ['id', 'subnet', 'gateway', 'dns', 'scope', 'notes']));
   L.push('devices:');
@@ -785,6 +793,7 @@ function toCatalogYaml(cat) {
   L.push('#', '# portTypes: the only port types that can be chosen.', '#   layer   ' + LAYER_KEYS.join(', '), '#   name    recommended port name; {n} = number, {a} = letter', '#   first   first number for {n} (default 1)',
     '#   dir     for power: in (inlet) or out (outlet)', '#   net     true = takes VLAN, IP, MAC and services', '#   virtual true = logical interface, no cable', '#   pass    true = relay contact: outlet N depends only on inlet N',
     '#   alias   other spellings; they are converted to the key', '# templates: device templates for the wizard. ports: one line per port, "name type".', '#   meta    optional, data each port inherits: { vlan, services, notes }');
+  L.push('format: ' + FORMAT);
   const pk = Object.keys(cat.portTypes).sort((a, b) => LAYER_KEYS.indexOf(cat.portTypes[a].layer) - LAYER_KEYS.indexOf(cat.portTypes[b].layer) || natCmp(a, b));
   L.push(pk.length ? 'portTypes:' : 'portTypes: {}');
   for (const k of pk) L.push('  ' + yamlStr(k) + ': ' + yamlFlow(cat.portTypes[k], ['label', 'layer', 'name', 'first', 'dir', 'net', 'virtual', 'pass', 'alias']));
@@ -913,6 +922,28 @@ function parseYaml(text) {
 }
 /* Pasted text or file: JSON when it starts with a brace, YAML otherwise. */
 const parseAny = text => (/^\s*\{/.test(text) ? JSON.parse(text) : parseYaml(text));
+/* FILE FORMAT of lab.yaml and catalog.yaml ("format:" key; missing = 1).
+   Rules, so data entered today is never typed again:
+   · Adding an optional field, a port type, a device type or a layer is NOT a new
+     format: old files simply lack it.
+   · Bump FORMAT only when old data would be misread (a field renamed, moved or
+     with a new meaning), and add to UPGRADE the step that converts it in place.
+   · Data from a newer format is refused (read-only), never rewritten by old code. */
+const FORMAT = 1;
+const UPGRADE = {
+  /* 1: o => { ...turn a format 1 object into format 2... }, */
+};
+function upgrade(o) {
+  if (!isObj(o)) return o;
+  const f = o.format == null ? 1 : +o.format;
+  if (!Number.isInteger(f) || f < 1) throw new Error('unknown data format "' + o.format + '"');
+  if (f > FORMAT) throw new Error(`data written by a newer Labmap (format ${f}, this one reads up to ${FORMAT}): update Labmap`);
+  for (let k = f; k < FORMAT; k++) UPGRADE[k](o);
+  delete o.format;
+  return o;
+}
+/* Every lab or catalog text from outside (server, backup, import, files) enters here. */
+const readData = text => upgrade(parseAny(text));
 
 /* ---------------------------------------------------------------------------
    12. Persistence and edit lock (NET)
@@ -920,7 +951,7 @@ const parseAny = text => (/^\s*\{/.test(text) ? JSON.parse(text) : parseYaml(tex
 const TAB = 't' + Math.random().toString(36).slice(2, 10);     // identifies this browser tab
 const LOG_MAX = 300, LOCK_TTL = 120000, IDLE_MAX = 600000, RENEW_EVERY = 40000, POLL_EVERY = 8000, CONNECT_MAX = 4000;
 /* mode: boot | server | offline (the server stopped answering) | local (no server) */
-const NET = { mode: 'boot', rev: 0, editing: false, lastAct: Date.now(), lastRenew: 0, saving: false, dirty: false, saveMsg: '', retry: 0, retryTimer: 0, localDirty: false };
+const NET = { mode: 'boot', rev: 0, editing: false, lastAct: Date.now(), lastRenew: 0, saving: false, dirty: false, saveMsg: '', retry: 0, retryTimer: 0, localDirty: false, blocked: '' };
 const withTimeout = (p, ms, fallback) => Promise.race([Promise.resolve(p), new Promise(r => setTimeout(() => r(fallback), ms))]);
 const who = () => UI.user || 'anon';
 const holder = () => who() + ':' + TAB;
@@ -942,9 +973,15 @@ async function connectServer() {
 /* The state travels as the two YAML texts. */
 function serverLoad(j) {
   let st;
-  try { st = parseYaml(j.lab || ''); if (!isObj(st)) st = {}; if (j.cat) st.catalog = parseYaml(j.cat); }
-  catch (e) { return showError('Unreadable data from the server: ' + e.message); }
-  S = normalize(st);
+  try { st = readData(j.lab || ''); if (!isObj(st)) st = {}; if (j.cat) st.catalog = readData(j.cat); st = normalize(st); }
+  catch (e) {                                                       // never edit (and save) over data this page cannot read
+    NET.blocked = 'Data not readable: ' + e.message + '. Read-only.'; NET.rev = +j.rev || 0;
+    if (NET.editing) leaveEdit();
+    showError(NET.blocked); renderHeader();
+    return false;
+  }
+  NET.blocked = '';
+  S = st;
   S.rev = +j.rev || 0;
   NET.rev = S.rev; NET.dirty = false; UNDO = null;
   refreshAll();
@@ -970,7 +1007,7 @@ function save() {
   NET.dirty = true; pump();
 }
 async function pump() {
-  if (NET.saving) return;
+  if (NET.saving || NET.blocked) return;
   clearTimeout(NET.retryTimer);
   NET.saving = true; NET.saveMsg = 'saving…'; renderHeader();
   try {
@@ -1004,6 +1041,7 @@ async function enterEdit() {
   if (!UI.user) return userDlg(() => enterEdit());                  // asked once
   if (NET.mode === 'local') return startEdit();
   if (NET.mode !== 'server') return toast('No connection to the server.');
+  if (NET.blocked) return toast(NET.blocked, { sticky: true });
   const b = $('#b-edit'); b.disabled = true;
   try {
     const r = await lockCall(LOCK_TTL);
@@ -1118,6 +1156,7 @@ function renderHeader() {
   else if (NET.mode === 'offline') note = 'No connection to the server.';
   if (NET.editing) note = 'Editing as ' + who() + (NET.mode === 'local' ? ' (local, not saved).' : '. Every change is saved.');
   if (NET.saveMsg === 'not saved') note = 'Not saved yet: the server does not answer. Retrying. Keep this page open.';
+  if (NET.blocked) note = NET.blocked;
   $('#notice').hidden = !note; $('#notice-t').textContent = note;
   for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.tab === UI.tab);
 }
@@ -2069,7 +2108,7 @@ async function backupText(file) {
 function restoreBackup(b, text) {
   confirmDlg(`Restore the ${b.layer} as it was at rev ${b.rev} (${backupTime(b.time)})?`, () => {
     try {
-      const obj = parseYaml(text);
+      const obj = readData(text);
       if (b.layer === 'catalog') { const c = normCatalog(obj); if (!Object.keys(c.portTypes).length) throw new Error('portTypes missing'); if (commit(`Catalog restored from the backup of rev ${b.rev}`, s => { s.catalog = c; })) closeDlg(true); return; }
       obj.catalog = clone(S.catalog);
       const st = normalize(obj);
@@ -2104,7 +2143,7 @@ function catEditDlg() {
     set(f, v) { w[f] = v; },
     on: { save: () => {
       let c;
-      try { c = normCatalog(parseYaml(w.text)); } catch (e) { return toast(e.message, { sticky: true }); }
+      try { c = normCatalog(readData(w.text)); } catch (e) { return toast(e.message, { sticky: true }); }
       if (!Object.keys(c.portTypes).length) return toast('portTypes missing.', { sticky: true });
       if (commit(`Catalog edited: ${plural(Object.keys(c.templates).length, 'template')}, ${plural(Object.keys(c.portTypes).length, 'type')}`, s => { s.catalog = c; })) closeDlg(true);
     } }
@@ -2137,7 +2176,7 @@ function importDlg(kind) {
     on: { go: () => {
       if (!NET.editing) return toast('Edit mode required.');
       let obj;
-      try { obj = parseAny(w.text); } catch (e) { return toast(e.message, { sticky: true }); }
+      try { obj = readData(w.text); } catch (e) { return toast(e.message, { sticky: true }); }
       const isCat = isObj(obj) && (isObj(obj.portTypes) || isObj(obj.templates)), isLab = isObj(obj) && (isObj(obj.devices) || Array.isArray(obj.links) || isObj(obj.vlans));
       if (kind === 'cat') {
         if (!isCat) return toast(isLab ? 'This is a lab, not a catalog.' : 'portTypes or templates missing.', { sticky: true });
@@ -2159,7 +2198,7 @@ function loadExample() {
     try {
       const r = await fetch('example/lab.yaml', { cache: 'no-cache' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const ex = parseYaml(await r.text());
+      const ex = readData(await r.text());
       ex.catalog = clone(S.catalog);
       if (replaceState(normalize(ex), 'Example lab loaded')) { UI.sel = UI.selLink = null; UI.project = ''; renderTab(); }
     } catch (e) { toast('Example not available (' + e.message + ').', { sticky: true }); }
@@ -2269,7 +2308,7 @@ async function boot() {
     try {
       const r = await fetch('defaults/catalog.yaml', { cache: 'no-cache' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      CATALOG0 = normCatalog(parseYaml(await r.text()));
+      CATALOG0 = normCatalog(readData(await r.text()));
     } catch (e) { showError('Default catalog not loaded (' + e.message + '). Import one in Catalog.'); }
     S = normalize({}); refreshAll();
     setMode('local');
@@ -2281,7 +2320,7 @@ async function boot() {
 const API = {
   VERSION, get state() { return S; }, get index() { return IX; }, get net() { return NET; }, get ui() { return UI; },
   layerOf, powerDir, isNetKind, kindKey, mapCol, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
-  toYaml, toCatalogYaml, parseYaml, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
+  FORMAT, toYaml, toCatalogYaml, parseYaml, readData, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
   /* load a lab without edit mode or saving (tests and console) */
   load: st => { st.catalog = st.catalog || clone(S.catalog); S = normalize(st); UNDO = null; refreshAll(); }
 };

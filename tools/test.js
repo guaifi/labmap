@@ -54,6 +54,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const bad = [];
   for (const k of Object.keys(cat0.templates)) for (const line of cat0.templates[k].ports) { const kind = line.split(/\s+/).slice(1).join(' '); if (!cat0.portTypes[kind]) bad.push(k + ':' + kind); }
   ok(!bad.length && ['pal', 'dvi', 'relay-in', 'relay-out', 'debug', 'rs232', 'iface'].every(k => cat0.portTypes[k]) && ['wall-socket', 'power-strip', 'switch-8', 'pc'].every(k => cat0.templates[k]), 'catalog: every template uses existing port types', bad.join());
+  let ferr = ''; try { L.readData('rev: 1\nformat: 99\ndevices:\n'); } catch (e) { ferr = e.message; }
+  ok(/^format: 1$/m.test(labTxt) && /^format: 1$/m.test(catTxt) && L.readData('rev: 1\ndevices:\n').format === undefined && /newer Labmap \(format 99/.test(ferr), 'files carry "format: 1"; a missing format is 1; a newer format is refused', ferr);
+  /* round trip of awkward text: quotes, #, :, line breaks, yes/no, numbers with zeros, unicode */
+  const ODD = ['', ' ', 'true', 'False', 'null', '~', 'yes', 'no', 'on', 'off', 'y', '0', '007', '1e3', '0x1F', '-1', '.5', '1.0', '.inf', 'NaN', '-', '- x', '# x', 'a # b', 'a: b', 'a:b', '{x}', '[x]', '"q"', "'q'", "it's", 'back\\slash', 'tab\there', 'line1\nline2', 'cr\r\n', ' lead', 'trail ', '&a', '*r', '!t', '%x', '@x', '`x`', '|', '>', '?', 'ñandú', 'Ünïcödé €', '中文', '😀', 'a, b', 'x}', 'x]', '192.168.1.1', '02:00:00:00:00:01', 'http://{ip}:8080/a?b=c#d', 'C:\\W', '50%', '=', '+5', '°C', '2026-01-01'];
+  let seed = 7; const rnd = n => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n;
+  const CH = 'abXY09 :#{}[],"\'\\\n\t-|>&*!%@`?=+/.ñ€😀', rs = () => (rnd(3) ? ODD[rnd(ODD.length)] : Array.from({ length: 1 + rnd(10) }, () => CH[rnd(CH.length)]).join(''));
+  const nm = i => (rs().replace(/:/g, '').trim() || 'x') + i;
+  const canon = v => Array.isArray(v) ? v.map(canon) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().filter(k => k !== 'catalog' && v[k] !== '' && v[k] !== undefined && v[k] !== false && !(Array.isArray(v[k]) && !v[k].length)).map(k => [k, canon(v[k])])) : v;
+  const same = (a, b) => { const x = canon(a), y = canon(b); x.links = x.links.map(l => JSON.stringify(l)).sort(); y.links = y.links.map(l => JSON.stringify(l)).sort(); return JSON.stringify(x) === JSON.stringify(y); };
+  let fz = 0, fzMsg = '';
+  for (let it = 0; it < 300; it++) {
+    const devices = {}, links = [], vlans = {};
+    for (let i = 0; i < 3; i++) devices[nm(i)] = { types: ['board'], model: rs(), serial: rs(), project: rs(), owner: rs(), location: rs(), notes: rs(), admin: rs(), ports: [0, 1, 2].map(j => ({ name: nm(j), kind: ['rj45', 'usb', 'ac-in'][j], ip: rs(), mac: rs(), vlan: rs(), vlans: [rs(), rs()].filter(Boolean), services: rs(), notes: rs() })) };
+    const dn = Object.keys(devices);
+    for (let i = 0; i < 3; i++) { const a = dn[rnd(3)], b = dn[rnd(3)]; links.push({ id: rs() + i, type: 'net', a: a + ':' + devices[a].ports[0].name, b: b + ':' + devices[b].ports[1].name, notes: rs() }); }
+    vlans[nm(0)] = { id: rnd(4000), subnet: rs(), gateway: rs(), dns: rs(), scope: 'local', notes: rs() };
+    const st = L.normalize({ rev: it, vlans, devices, links, ipUse: [{ vlan: rs(), from: rs(), to: rs(), iface: rs(), who: rs(), notes: rs() }], log: [{ t: rs(), by: rs(), msg: rs(), rev: 1 }] });
+    const c = JSON.parse(JSON.stringify(cat0)); c.templates[nm(0)] = { label: rs(), types: ['board'], model: rs(), pattern: rs(), power: 'dc', admin: rs(), notes: rs(), ports: ['eth0 rj45'], meta: { eth0: { vlan: rs(), services: rs(), notes: rs() } } };
+    const y = L.toYaml(st, true), yc = L.toCatalogYaml(L.normCatalog(c));
+    try { const st2 = L.normalize(L.readData(y)); if (L.toYaml(st2, true) !== y || !same(st, st2) || L.toCatalogYaml(L.normCatalog(L.readData(yc))) !== yc) { fz++; fzMsg = fzMsg || y; } } catch (e) { fz++; fzMsg = fzMsg || e.message; }
+  }
+  ok(fz === 0, 'YAML round trip of 300 labs and catalogs full of awkward text: nothing lost', fz ? fz + ' failed: ' + fzMsg.slice(0, 300) : '');
   let yerr = ''; try { L.parseYaml('a:\n  b: 1\n   c: 2'); } catch (e) { yerr = e.message; }
   ok(/line 3/.test(yerr), 'badly indented YAML reports the line number', yerr);
 
@@ -497,6 +519,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   let r2 = null; for (let i = 0; i < 60 && !r2; i++) { try { r2 = await (await fetch('http://127.0.0.1:' + port2 + '/api/state')).json(); } catch (e) { await sleep(100); } }
   py2.kill();
   ok(r2 && r2.rev === 0 && fs.existsSync(path.join(other, 'lab.yaml')) && fs.existsSync(path.join(other, 'catalog.yaml')) && fs.existsSync(path.join(other, 'backups')), '--data keeps the data in another folder (e.g. another disk)');
+  const labNow = fs.readFileSync(path.join(DATA, 'lab.yaml'), 'utf8');
+  fs.writeFileSync(path.join(DATA, 'lab.yaml'), labNow.replace(/^rev: 4$/m, 'rev: 9').replace(/^format: 1$/m, 'format: 2'));
+  const D = await open(srvUrl + '/', { viewport: { width: 1280, height: 900 } }, () => window.LAB && LAB.net.mode === 'server');
+  await D.evaluate(() => { LAB.ui.user = 'dan'; document.getElementById('err').hidden = true; });
+  await D.click('#b-edit');
+  await sleep(300);
+  const ro = await D.evaluate(() => ({ editing: LAB.net.editing, notice: document.getElementById('notice-t').textContent, err: document.getElementById('err').hidden ? '' : document.getElementById('err').textContent }));
+  ok(!ro.editing && /newer Labmap \(format 2/.test(ro.notice) && /Read-only/.test(ro.notice), 'data from a newer format: read-only, with the reason; edit mode refused', ro.notice);
+  await sleep(1300);
+  const old = await D.evaluate(async () => { await fetch('api/lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ holder: 'old', by: 'old', ttlMs: 5000 }) }); const r = await fetch('api/state', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rev: 10, base: 9, holder: 'old', by: 'old', lab: 'rev: 10\nformat: 1\ndevices:\n', cat: '' }) }); const j = await r.json(); await fetch('api/lock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ holder: 'old', by: 'old', ttlMs: 1 }) }); return r.status + ' ' + j.error; });
+  ok(/^400 older data format/.test(old) && /^format: 2$/m.test(fs.readFileSync(path.join(DATA, 'lab.yaml'), 'utf8')), 'the server refuses to overwrite newer-format data from older code', old);
+  fs.writeFileSync(path.join(DATA, 'lab.yaml'), labNow);
+  await A.waitForFunction(() => LAB.net.rev === 4 && !LAB.net.blocked, null, { timeout: 15000 }).catch(() => {});
+  ok(await A.evaluate(() => LAB.net.rev === 4 && !LAB.net.blocked), 'once the data is readable again the page recovers by itself');
+  await A.evaluate(() => { const e = document.getElementById('err'); if (e) e.hidden = true; });
   py.kill(); await sleep(400);
   fs.writeFileSync(path.join(tmp, 'app.js'), fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8').replace(/const VERSION = '[^']+';/, "const VERSION = '9.9.9';"));
   fs.writeFileSync(path.join(tmp, 'defaults', 'catalog.yaml'), 'portTypes: {}\ntemplates: {}\n');
