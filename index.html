@@ -129,7 +129,9 @@ svg.map .lk .v{fill:none;stroke:var(--L-other);stroke-width:1.5}
 svg.map .lk .hit{fill:none;stroke:transparent;stroke-width:13;pointer-events:stroke}
 svg.map .ln-power .v{stroke-dasharray:7 4}
 svg.map .ln-radio .v{stroke-dasharray:2 4;stroke-linecap:round}
+svg.map .lk.far .v{opacity:.45}
 svg.map.has-sel .lk:not(.hl){opacity:.1}
+svg.map .lk.hl .v{opacity:1}
 svg.map .lk.hl .v{stroke-width:3}
 svg.map .ltag rect{fill:var(--tag)} svg.map .ltag text{fill:var(--tag-ink);font-size:8.5px;font-weight:700}
 .ln-net .v{stroke:var(--L-net)!important}.ln-power .v{stroke:var(--L-power)!important}.ln-serial .v{stroke:var(--L-serial)!important}
@@ -270,6 +272,7 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
     <div class="row">
       <input class="grow" id="cq" type="search" placeholder="Filter: id, device, note" autocomplete="off" aria-label="Filter cables">
       <select class="grow" id="c-layer" aria-label="Layer"></select>
+      <button class="btn" data-act="export" data-k="labels">Labels CSV</button>
       <button class="btn pri ed" data-act="add-link">+ Cable</button>
     </div>
     <div id="cab-list"></div>

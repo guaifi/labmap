@@ -4,28 +4,41 @@ Living documentation for a lab, office or home network: which devices exist, whi
 ports they have, which cables join them, how they are powered and which IP each one
 uses. One web page, one small Python server, two YAML files. No dependencies.
 
-- **Map** drawn from the data: infrastructure in the centre, devices grouped by project
-  on both sides, one colour per layer (network, power, serial, JTAG, USB, video, buses,
-  RF, radio, discrete).
+- **Map** drawn from the data in five columns: power (sockets, UPS, strips, PDUs, relays),
+  supplies, devices (grouped by project), adapters and hubs, network (routers, switches,
+  servers). One colour per layer (network, power, serial, JTAG, USB, video, buses, RF,
+  radio, discrete). Export as SVG, or as a static HTML report (print it to PDF).
 - **Device sheet**: ports, cables, power chain ("powered from", "if switched off, these
   go down"), which PDU or relay outlet switches it, link to its admin page.
 - **Routes** through adapters, hubs and bus couplers: follow a serial console from a
   board to the server it ends up on.
 - **IP addresses** per VLAN: grid of free / on a port / noted / conflicting addresses,
-  netmask, gateway, DNS, "give me a free IP".
+  netmask, gateway, DNS, "give me a free IP", and the ports in each VLAN (access and
+  tagged trunk ports).
+- **Cables in bulk** (consecutive ports) and a **labels CSV** for the label printer.
 - **Validation** that never blocks: duplicate IP or MAC, cable to a missing port,
   mismatched port types, device with no power cable.
 - **Catalog** of port types and device templates, editable from the page.
-- **Edit lock**, change log and undo. Works on a phone.
+- **Edit lock**, change log, undo, and backups you can restore from the page. A save
+  that fails while the server is down is kept and retried. Works on a phone.
 
-## Run
+## Install
 
-Needs Python 3.7 or later. Nothing to install.
+Needs Python 3.7 or later (Linux, Windows or macOS). Nothing else to install. Pick a
+released version from the [tags](https://github.com/guaifi/labmap/tags):
 
 ```bash
-git clone https://github.com/guaifi/labmap.git
-cd labmap
-python3 server.py --port 8080
+git clone --branch v0.5.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+```
+
+```bash
+python3 /opt/labmap/server.py --port 8080
+```
+
+Without Git, download the archive of that version instead:
+
+```bash
+mkdir -p /opt/labmap && curl -L https://github.com/guaifi/labmap/archive/refs/tags/v0.5.0.tar.gz | tar xz --strip-components=1 -C /opt/labmap
 ```
 
 Open `http://<host>:8080`. Press **Edit**, type a user name, add devices and cables.
@@ -45,23 +58,32 @@ expose it to the Internet.
 
 `data-do-not-edit/` is the database. The server creates it on first run (the catalog
 is copied from `defaults/catalog.yaml`) and it is git-ignored. Do not edit those files
-by hand: change them from the page. Each layer has its own **Export** and **Import**
+by hand: change them from the page. To keep it somewhere else (another disk, a synced
+folder), start the server with `--data /path/to/folder`. Each layer has its own **Export** and **Import**
 (add or replace) in the Data and Catalog tabs.
 
 ## Update
 
-The code and the data are separate, so updating never touches the data:
+The code and the data are separate, so updating never touches the data. With Git, move
+to the version you want (or back to the previous one):
 
 ```bash
-git pull
+cd /opt/labmap && git fetch --depth 1 origin tag v0.5.1 && git checkout v0.5.1
+```
+
+```bash
 sudo systemctl restart labmap
 ```
+
+Without Git, extract the new archive over the old folder (the data folder is not in the
+archive, so it is kept), then restart. If the data lives outside with `--data`, the code
+folder can simply be deleted and replaced. The version in use is shown next to the title.
 
 New templates or port types from a newer `defaults/catalog.yaml` are not applied to an
 existing installation automatically: import that file in **Catalog > + Template or
 type** (mode "Add").
 
-## Run as a service
+## Run as a service (Linux)
 
 `/etc/systemd/system/labmap.service`:
 
@@ -72,7 +94,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/labmap
-ExecStart=/usr/bin/python3 /opt/labmap/server.py --port 8080
+ExecStart=/usr/bin/python3 /opt/labmap/server.py --port 8080 --data /var/lib/labmap
 Restart=always
 User=labmap
 
@@ -82,22 +104,38 @@ WantedBy=multi-user.target
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin labmap
-sudo chown -R labmap: /opt/labmap
+sudo mkdir -p /var/lib/labmap && sudo chown labmap: /var/lib/labmap
 sudo systemctl enable --now labmap
 ```
 
-## Backups
+## Backups and privacy
 
-Every save keeps the previous version in `data-do-not-edit/backups/` (last 300 per
-file). The change log inside `lab.yaml` keeps the last 300 changes. For full history,
-put the data folder in its own Git repository and commit it from cron:
+Every save keeps the previous version in `backups/` inside the data folder (last 300
+per file). **Data > Backups** lists them; **Restore** brings one back as a normal
+change (logged, with Undo). The change log inside `lab.yaml` keeps the last 300 changes.
+
+The data holds IPs, MACs, serial numbers and admin URLs: treat it as sensitive.
+
+- Never put the data folder in a public repository. It is git-ignored here for that
+  reason.
+- Keep it encrypted at rest with disk encryption on the server PC (LUKS, BitLocker,
+  FileVault). The page does not encrypt it: browser-side encryption with a shared
+  password would add little against someone who already has the files or the page.
+- Copy it off the machine. For example a nightly copy of the data folder (here the
+  default one; use yours if you start the server with `--data`) to another disk:
 
 ```bash
-cd /opt/labmap/data-do-not-edit && git add lab.yaml catalog.yaml && git commit -qm "backup $(date +%F)" && git push -q
+rsync -a /opt/labmap/data-do-not-edit/ /mnt/backup/labmap/
 ```
 
-To restore: stop the service, copy a file from `backups/` over `lab.yaml` or
-`catalog.yaml`, start it again. Or use **Data > Import > Replace everything**.
+  or keep the data folder in its own **private** Git repository and commit it from cron:
+
+```bash
+cd /opt/labmap/data-do-not-edit && git add -A && git commit -qm "backup $(date +%F)" && git push -q
+```
+
+To restore by hand: stop the service, copy a file from `backups/` over `lab.yaml` or
+`catalog.yaml`, start it again.
 
 ## Concepts
 

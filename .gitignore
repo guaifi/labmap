@@ -1,5 +1,10 @@
 # Live data: created by server.py on first run, never committed
 data-do-not-edit/
+# Any other copy of the database kept next to the code
+/lab.yaml
+/catalog.yaml
+backups/
+*.yaml.bak
 # Development
 node_modules/
 tools/shots/

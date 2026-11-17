@@ -50,7 +50,8 @@
      vlans    { NAME: { id, subnet:"10.20.10.0/24", gateway, dns, scope:"it"|"local", notes } }
      devices  { NAME: { types:[..], model, serial, project, owner, location, notes,
                 admin:"http://{ip}", expectedPower:"pdu"|"dc"|"ups"|"wall"|"none",
-                ports:[ { name, kind, virtual?, ip?, mac?, vlan?, services?, notes? } ] } }
+                ports:[ { name, kind, virtual?, ip?, mac?, vlan?, vlans?:[..], services?, notes? } ] } }
+              vlan = access (untagged) VLAN; vlans = tagged VLANs on a trunk port.
               NAME = physical label = hostname; no ":" allowed. kind = key of portTypes.
      links    [ { id, type, a:"device:port", b:"device:port", notes } ]
               type is a key of LAYERS. For power, a = outlet and b = inlet.
@@ -70,7 +71,8 @@
    boot() draws an empty lab, then asks the server:
    · SERVER (server.py, Python 3, standard library only). State travels as the
      two YAML texts; the server does not parse YAML, it only writes atomically and
-     keeps the previous version in data-do-not-edit/backups/.
+     keeps the previous version in <data>/backups/ (data folder: --data, default
+     data-do-not-edit/ next to server.py).
        GET  /api/state  -> { labmap, rev, lab, cat }
        GET  /api/rev    -> { rev }                 (polled every POLL_EVERY)
        PUT  /api/state  <- { rev, base, holder, by, msg, lab, cat }
@@ -78,6 +80,13 @@
                            revision | 423 { by } if somebody else holds the lock
        POST /api/lock   <- { holder, by, ttlMs }   (small ttlMs = release)
                         -> { acquired, by, expiresAt }
+       GET  /api/backups           -> { backups:[{ file, layer, rev, time }] } newest first
+       GET  /api/backup?file=NAME  -> { file, text }
+     A save that fails for network or server reasons (not 4xx) stays pending and
+     is retried with backoff (3 s doubling, at most 30 s); the page shows "Not
+     saved yet", closing it asks first, polling never overwrites pending changes
+     and leaving edit mode keeps the lock until the save goes through.
+     Restoring a backup (Data > Backups) is an ordinary commit: logged, undoable.
      The lock lasts LOCK_TTL (2 min) and is renewed every RENEW_EVERY while edit
      mode stays open; edit mode closes itself after IDLE_MAX (10 min) idle.
    · NO SERVER (page opened from static hosting): local in-memory mode with a
@@ -87,21 +96,36 @@
    6. WHERE TO CHANGE WHAT
      Port types and templates ............ in the page (Catalog tab) or defaults/catalog.yaml
      Layers, cable prefixes, strokes ..... LAYERS; colours in index.html (--L-*)
-     Device types, centre column, pass ... TYPES
+     Device types, pass-through .......... TYPES
+     Map column of a device .............. mapCol(), POWER_INFRA, NET_INFRA
      Connection wizard shortcuts ......... SHORTCUTS
      Validation rules .................... validate()
      Routes through pass-through devices . exitsOf() and routesFrom()
      Power chain and cascade ............. chainsUp(), cascade(), switchesOf()
-     Map layout .......................... MAP (sizes), buildMap(), projectSides()
+     Map layout .......................... MAP (sizes), buildMap(), mapSvg()
+     Exports (SVG, report, labels CSV) ... exportMapSvg(), reportHtml(), labelsCsv()
      IP grid and proposals ............... ipInfo(), freeIp(), renderIps()
      YAML format ......................... toYaml(), toCatalogYaml(), parseYaml()
      Persistence and lock ................ section 12 (NET) and server.py
 
    7. DESIGN DECISIONS
-   · Map: infrastructure (power, network, servers) and instrumentation (bench
-     supplies, instruments) in the centre; devices on both sides, grouped by
-     project, each project on one side, balanced by height. Physical position in
-     the room is not used.
+   · Map in five columns (MAP_COLS), left to right: Power (wall sockets, UPS,
+     strips, PDUs, relay boards), Supplies (bench supplies, distribution boxes),
+     Devices (DUTs, boards, PCs, instruments; grouped by project in bands),
+     Adapters (pass-through devices: serial and USB adapters, hubs, couplers),
+     Network (routers, switches, APs, servers, radio hubs). Devices are stacked
+     first; the other columns are placed at the barycentre of their peers.
+     Cables that jump three or more columns are drawn faint until selected.
+     Physical position in the room is not used.
+   · Exports: Map SVG is the whole lab whatever the filters, with its CSS inlined
+     (light theme); Report HTML is one static file (map + tables) to print as PDF;
+     Labels CSV is one row per shown cable (the Cables tab filter applies).
+   · Ports: vlan is the access (untagged) VLAN, vlans the tagged ones of a trunk.
+     A net cable between two different access VLANs is warned unless one end
+     carries the other's VLAN tagged. The IPs tab lists the members of each VLAN.
+   · New cable with "How many" > 1 joins consecutive ports of the same type at both
+     ends (only free ones when "Only free" is on), one id each, in one commit.
+     "Connect + next" keeps the wizard open on the same devices.
    · A box only lists ports with a visible cable; free ports are in the device
      sheet. Ports in a box are ordered by where the other end is.
    · Project filter shows what the routes of its devices reach (a shared hub does
@@ -139,13 +163,16 @@
      dual coupler never mixes with bus B; switching a PDU off takes down what hangs
      from it (a dual-fed server only loses redundancy).
    · Both YAML files are read and written back identically.
-   · server.py with two browsers: lock, save, polling, 409/423, code update.
+   · server.py with two browsers: lock, save, polling, 409/423, backups list and
+     restore, save retried while the server is down, --data, code update.
    window.LAB exposes the state and the pure functions for the browser console.
 
    9. KNOWN LIMITS
    · Every save sends both YAML files whole (about 165 kB for 270 devices).
    · Other browsers see a change after POLL_EVERY (8 s).
-   · server.py has no passwords and no HTTPS: lab network only.
+   · server.py has no passwords and no HTTPS: lab network only. Data is not
+     encrypted by the app: use disk encryption on the server PC. The data folder
+     must never go to a public repository.
    · The YAML reader understands what this tool writes (see parseYaml): no block
      scalars (| and >), no anchors, no multi-line { } or [ ].
    · The log keeps the last LOG_MAX entries; backups keep the last 300 versions.
@@ -157,7 +184,7 @@
    · Undo covers the last change of this tab only.
    ============================================================================ */
 'use strict';
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 /* ---------------------------------------------------------------------------
    1. Utilities
@@ -264,22 +291,21 @@ function normCatalog(c) {
 /* ---------------------------------------------------------------------------
    3. Device types and connection shortcuts
    --------------------------------------------------------------------------- */
-/* infra: drawn in the centre column (the number is the vertical order: power first,
-   then network, instrumentation last). src: power source. pass: pass-through device
-   ('adapter' | 'hub' | 'bus'); routes go through it. */
+/* src: power source. pass: pass-through device ('adapter' | 'hub' | 'bus'); routes go
+   through it. The map column of each device is decided by mapCol(). */
 const TYPES = {
-  wall:       { label: 'Wall socket',     tag: 'WALL',   infra: 1, src: 1 },
-  ups:        { label: 'UPS',             tag: 'UPS',    infra: 2, src: 1 },
-  strip:      { label: 'Power strip',     tag: 'STRIP',  infra: 3, src: 1 },
-  pdu:        { label: 'PDU',             tag: 'PDU',    infra: 4, src: 1 },
-  relay:      { label: 'Relay board',     tag: 'RELAY',  infra: 4.5, src: 1 },
-  psu:        { label: 'Bench supply',    tag: 'PSU',    infra: 5, src: 1 },
-  router:     { label: 'Router',          tag: 'ROUTER', infra: 6 },
-  switch:     { label: 'Switch',          tag: 'SWITCH', infra: 7 },
-  ap:         { label: 'Access point',    tag: 'AP',     infra: 8 },
-  server:     { label: 'Server',          tag: 'SERVER', infra: 9 },
-  radiohub:   { label: 'Radio hub',       tag: 'RADIO',  infra: 10 },
-  instrument: { label: 'Instrument',      tag: 'INSTR',  infra: 11 },
+  wall:       { label: 'Wall socket',     tag: 'WALL', src: 1 },
+  ups:        { label: 'UPS',             tag: 'UPS', src: 1 },
+  strip:      { label: 'Power strip',     tag: 'STRIP', src: 1 },
+  pdu:        { label: 'PDU',             tag: 'PDU', src: 1 },
+  relay:      { label: 'Relay board',     tag: 'RELAY', src: 1 },
+  psu:        { label: 'Bench supply',    tag: 'PSU', src: 1 },
+  router:     { label: 'Router',          tag: 'ROUTER' },
+  switch:     { label: 'Switch',          tag: 'SWITCH' },
+  ap:         { label: 'Access point',    tag: 'AP' },
+  server:     { label: 'Server',          tag: 'SERVER' },
+  radiohub:   { label: 'Radio hub',       tag: 'RADIO' },
+  instrument: { label: 'Instrument',      tag: 'INSTR' },
   pc:         { label: 'PC',              tag: 'PC' },
   board:      { label: 'Board or DUT',    tag: 'DUT' },
   sensor:     { label: 'Sensor',          tag: 'SENSOR' },
@@ -289,8 +315,6 @@ const TYPES = {
   other:      { label: 'Other',           tag: 'OTHER' }
 };
 const typeLabel = t => (TYPES[t] ? TYPES[t].label : t);
-const isInfra = d => d.types.some(t => TYPES[t] && TYPES[t].infra);
-const infraOrd = d => Math.min.apply(null, d.types.map(t => (TYPES[t] && TYPES[t].infra) || 99));
 const EXP = { pdu: 'PDU', dc: 'DC supply', ups: 'UPS', wall: 'wall or strip', none: 'none' };
 
 /* Shortcuts of the connection wizard. a and b filter candidate devices and ports:
@@ -330,7 +354,12 @@ function normalize(st) {
     const d = isObj(st.devices[n]) ? st.devices[n] : (st.devices[n] = {});
     d.types = (Array.isArray(d.types) && d.types.length ? d.types : [d.types || 'other']).map(String);
     d.ports = (Array.isArray(d.ports) ? d.ports : []).filter(p => isObj(p) && p.name != null && p.name !== '');
-    for (const p of d.ports) { p.name = String(p.name); p.kind = canon(p.kind); if (pt[p.kind] && pt[p.kind].virtual) p.virtual = true; }
+    for (const p of d.ports) {
+      p.name = String(p.name); p.kind = canon(p.kind);
+      if (pt[p.kind] && pt[p.kind].virtual) p.virtual = true;
+      const tg = (Array.isArray(p.vlans) ? p.vlans : p.vlans ? String(p.vlans).split(/[\s,]+/) : []).map(String).filter(Boolean);      // tagged VLANs (trunk)
+      if (tg.length) p.vlans = tg; else delete p.vlans;
+    }
     for (const k of ['model', 'serial', 'project', 'owner', 'location', 'notes', 'admin']) d[k] = d[k] == null ? '' : String(d[k]);
     d.expectedPower = EXP[d.expectedPower] ? d.expectedPower : 'none';
   }
@@ -351,7 +380,6 @@ function reindex() {
   }
   IX = ix;
   ix.ip = buildIpIndex();
-  ix.projSide = projectSides();
   ix.issues = validate();
   ix.issueDev = new Map();
   for (const i of ix.issues) if (i.dev && (ix.issueDev.get(i.dev) !== 'err')) ix.issueDev.set(i.dev, i.level);
@@ -456,6 +484,8 @@ function validate() {
     if (!A || !B) continue;
     const la = layerOf(A.p.kind), lb = layerOf(B.p.kind);
     if (la !== lb && la !== 'other' && lb !== 'other') add('warn', 'types', `Cable ${l.id}: ${l.a} (${A.p.kind}) and ${l.b} (${B.p.kind}) do not match`, { link: l.id, dev: A.dev });
+    if (l.type === 'net' && A.p.vlan && B.p.vlan && A.p.vlan !== B.p.vlan && !(A.p.vlans || []).includes(B.p.vlan) && !(B.p.vlans || []).includes(A.p.vlan))
+      add('warn', 'vlan-mismatch', `Cable ${l.id}: ${l.a} is in VLAN ${A.p.vlan} and ${l.b} in ${B.p.vlan}`, { link: l.id, dev: A.dev });
     if (l.type === 'power') {
       const da = powerDir(A.p.kind), db = powerDir(B.p.kind);
       if (da === 'in' && db === 'out') add('warn', 'direction', `Cable ${l.id}: reversed; the first end must be the outlet`, { link: l.id, dev: A.dev });
@@ -476,7 +506,7 @@ function validate() {
     const p = P.p;
     if (p.mac) push(macs, normMac(p.mac), ref);
     if (kindKey(p.kind) && !isNetKind(p.kind) && (p.ip || p.mac || p.vlan || p.services)) add('warn', 'net-on-non-net', `${ref} is ${p.kind} and carries network data (VLAN, IP, MAC or services)`, { dev: P.dev });
-    if (p.vlan && !S.vlans[p.vlan]) add('warn', 'vlan', `${ref}: VLAN "${p.vlan}" is not defined`, { dev: P.dev });
+    for (const v of [p.vlan].concat(p.vlans || [])) if (v && !S.vlans[v]) add('warn', 'vlan', `${ref}: VLAN "${v}" is not defined`, { dev: P.dev });
     if (!p.ip) continue;
     const n = ipToInt(p.ip);
     if (n == null) { add('warn', 'ip-bad', `${ref}: "${p.ip}" is not a valid IPv4`, { dev: P.dev }); continue; }
@@ -738,7 +768,7 @@ function toYaml(st, noDate) {
     L.push('    types: ' + yamlVal(d.types));
     for (const k of ['model', 'serial', 'project', 'owner', 'location', 'notes', 'admin']) if (d[k]) L.push('    ' + k + ': ' + yamlStr(d[k]));
     if (d.expectedPower && d.expectedPower !== 'none') L.push('    expectedPower: ' + yamlStr(d.expectedPower));
-    if (d.ports.length) { L.push('    ports:'); for (const p of d.ports) L.push('      - ' + yamlFlow(p, ['name', 'kind', 'virtual', 'ip', 'mac', 'vlan', 'services', 'notes'])); }
+    if (d.ports.length) { L.push('    ports:'); for (const p of d.ports) L.push('      - ' + yamlFlow(p, ['name', 'kind', 'virtual', 'ip', 'mac', 'vlan', 'vlans', 'services', 'notes'])); }
     else L.push('    ports: []');
   }
   L.push(st.links.length ? 'links:' : 'links: []');
@@ -890,7 +920,7 @@ const parseAny = text => (/^\s*\{/.test(text) ? JSON.parse(text) : parseYaml(tex
 const TAB = 't' + Math.random().toString(36).slice(2, 10);     // identifies this browser tab
 const LOG_MAX = 300, LOCK_TTL = 120000, IDLE_MAX = 600000, RENEW_EVERY = 40000, POLL_EVERY = 8000, CONNECT_MAX = 4000;
 /* mode: boot | server | offline (the server stopped answering) | local (no server) */
-const NET = { mode: 'boot', rev: 0, editing: false, lastAct: Date.now(), lastRenew: 0, saving: false, dirty: false, saveMsg: '' };
+const NET = { mode: 'boot', rev: 0, editing: false, lastAct: Date.now(), lastRenew: 0, saving: false, dirty: false, saveMsg: '', retry: 0, retryTimer: 0, localDirty: false };
 const withTimeout = (p, ms, fallback) => Promise.race([Promise.resolve(p), new Promise(r => setTimeout(() => r(fallback), ms))]);
 const who = () => UI.user || 'anon';
 const holder = () => who() + ':' + TAB;
@@ -920,12 +950,11 @@ function serverLoad(j) {
   refreshAll();
 }
 async function poll() {
-  if (NET.saving || NET.dirty) return;
   try {
     const r = await httpJson('GET', 'api/rev');
     if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status);
     if (NET.mode === 'offline') setMode('server');
-    if (r.j.rev === NET.rev) return;
+    if (NET.saving || NET.dirty || r.j.rev === NET.rev) return;      // unsaved local changes are never overwritten
     const s = await httpJson('GET', 'api/state');
     if (s.status !== 200 || !s.j || NET.saving || NET.dirty || s.j.rev === NET.rev) return;
     const was = S.rev, ed = NET.editing;
@@ -933,10 +962,16 @@ async function poll() {
     if (ed) toast(`Changed by another user (rev ${was} → ${s.j.rev}). Reloaded.`, { sticky: true });
   } catch (e) { if (NET.mode === 'server') setMode('offline'); }
 }
-/* Save: one write at a time; changes made while writing are sent in the next round. */
-function save() { if (NET.mode === 'local' || NET.mode === 'boot') return; NET.dirty = true; pump(); }
+/* Save: one write at a time; changes made while writing are sent in the next round.
+   If the server does not answer, the change stays pending and is retried (3 s, 6 s...
+   up to 30 s) until it is saved; closing the page meanwhile asks first. */
+function save() {
+  if (NET.mode === 'local' || NET.mode === 'boot') { NET.localDirty = true; return; }
+  NET.dirty = true; pump();
+}
 async function pump() {
   if (NET.saving) return;
+  clearTimeout(NET.retryTimer);
   NET.saving = true; NET.saveMsg = 'saving…'; renderHeader();
   try {
     while (NET.dirty) {
@@ -945,15 +980,19 @@ async function pump() {
       const r = await httpJson('PUT', 'api/state', { rev, base: NET.rev, holder: holder(), by: who(), msg: (S.log[S.log.length - 1] || {}).msg || '', lab: toYaml(S, true), cat: toCatalogYaml(S.catalog) });
       if (r.status === 409 && r.j) { serverLoad(r.j); toast(`Someone saved first (rev ${r.j.rev}). Reloaded: repeat the change.`, { sticky: true }); break; }
       if (r.status === 423) { NET.rev = -1; leaveEdit('Lock lost. Editing: ' + ((r.j && r.j.by) || 'another user') + '.'); poll(); break; }
-      if (r.status !== 200) throw new Error('HTTP ' + r.status + (r.j && r.j.error ? ': ' + r.j.error : ''));
+      if (r.status >= 400 && r.status < 500) { const e = new Error('HTTP ' + r.status + (r.j && r.j.error ? ': ' + r.j.error : '')); e.fatal = true; throw e; }
+      if (r.status !== 200) throw new Error('HTTP ' + r.status);
       NET.rev = rev;
     }
-    NET.saveMsg = '';
+    NET.saveMsg = ''; NET.retry = 0;
+    if (NET.mode === 'offline') NET.mode = 'server';
   } catch (e) {
     NET.saveMsg = 'not saved';
-    showError('Not saved (' + ((e && e.message) || e) + '). Export so the change is not lost.');
+    if (e && e.fatal) showError('Not saved (' + e.message + '). Export so the change is not lost.');
+    else { NET.dirty = true; NET.retryTimer = setTimeout(pump, Math.min(30000, 3000 * Math.pow(2, NET.retry++))); }     // network or server error: keep it and try again
   } finally { NET.saving = false; renderHeader(); }
 }
+const unsaved = () => NET.dirty || NET.saving || (NET.mode === 'local' && NET.localDirty);
 /* Edit lock: { acquired, by, expiresAt }. A small ttlMs releases it. */
 async function lockCall(ttlMs) {
   const r = await httpJson('POST', 'api/lock', { holder: holder(), by: who(), ttlMs });
@@ -981,7 +1020,7 @@ function leaveEdit(msg) {
   if (!NET.editing) return;
   NET.editing = false; UNDO = null;
   document.body.classList.remove('editing');
-  if (NET.mode !== 'local') lockCall(1000).catch(() => {});         // release: 1 s lock
+  if (NET.mode !== 'local' && NET.saveMsg !== 'not saved') lockCall(1000).catch(() => {});         // release: 1 s lock (kept while a save is pending)
   closeDlg(true); renderHeader(); renderTab();
   if (msg) toast(msg, { sticky: true });
 }
@@ -1023,7 +1062,7 @@ function undo() { if (!UNDO) return; const u = UNDO; if (replaceState(normalize(
 /* ---------------------------------------------------------------------------
    13. UI state (the only thing that does not live in S) and shared pieces
    --------------------------------------------------------------------------- */
-const MAP = { W: 140, HEAD: 30, ROW: 13, GAPY: 9, BAND: 22, COLGAP: 88, PADX: 12, TOP: 20 };
+const MAP = { W: 140, HEAD: 30, ROW: 13, GAPY: 9, BAND: 22, COLGAP: 88, PADX: 70, TOP: 20 };
 const UI = { tab: 'map', layers: {}, project: '', q: '', fit: false, zoom: 1, sel: null, selLink: null, vlan: '', ipBlock: null, dq: '', dtype: '', cq: '', clayer: '', logN: 40, lastWho: '', center: null, user: '' };
 for (const k of LAYER_KEYS) UI.layers[k] = true;
 let LAYOUT = null;      // last map layout (to centre on a device)
@@ -1076,8 +1115,9 @@ function renderHeader() {
   else { be.textContent = 'Edit'; be.className = 'btn sm'; }
   let note = '';
   if (NET.mode === 'local') note = 'Local mode: changes are not saved. Use Data → Export.';
-  else if (NET.mode === 'offline') note = 'No connection to the server. Nothing is saved until it is back.';
+  else if (NET.mode === 'offline') note = 'No connection to the server.';
   if (NET.editing) note = 'Editing as ' + who() + (NET.mode === 'local' ? ' (local, not saved).' : '. Every change is saved.');
+  if (NET.saveMsg === 'not saved') note = 'Not saved yet: the server does not answer. Retrying. Keep this page open.';
   $('#notice').hidden = !note; $('#notice-t').textContent = note;
   for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('on', b.dataset.tab === UI.tab);
 }
@@ -1112,19 +1152,22 @@ function renderMapTab() {
   renderMap();
 }
 
-/* Projects are split between the two sides: each project whole on one side, largest
-   first, always on the lighter side. Physical position in the room is not used. */
-function projectSides() {
-  const load = {};
-  for (const n of IX.names) {
-    const d = S.devices[n];
-    if (isInfra(d) || passMode(n)) continue;
-    const g = d.project || '';
-    load[g] = (load[g] || 0) + 3 + (IX.byDev.get(n) || []).length;
-  }
-  const side = {}, tot = { L: 0, R: 0 };
-  for (const g of Object.keys(load).sort((a, b) => load[b] - load[a] || natCmp(a, b))) { const s = tot.L <= tot.R ? 'L' : 'R'; side[g] = s; tot[s] += load[g]; }
-  return side;
+/* Map column of a device, by role:
+   0 power infrastructure (wall, UPS, strips, PDUs, relay boards)
+   1 supplies and power distribution (bench supplies, boxes that only pass power on)
+   2 devices, grouped by project
+   3 adapters, hubs and bus couplers
+   4 network infrastructure (switches, routers, access points, servers, radio hubs)
+   Power flows left to right into the devices; data flows right from them. */
+const POWER_INFRA = ['wall', 'ups', 'strip', 'pdu', 'relay'], NET_INFRA = ['router', 'switch', 'ap', 'server', 'radiohub'];
+const MAP_COLS = ['Power', 'Supplies', 'Devices', 'Adapters', 'Network'];
+function mapCol(n) {
+  const d = S.devices[n], t = d.types;
+  if (t.some(x => POWER_INFRA.includes(x))) return 0;
+  if (t.some(x => NET_INFRA.includes(x))) return 4;
+  const real = d.ports.filter(p => !p.virtual);
+  if (t.includes('psu') || (real.length && real.every(p => layerOf(p.kind) === 'power') && real.some(p => powerDir(p.kind) === 'out'))) return 1;
+  return passMode(n) ? 3 : 2;
 }
 function searchMatch(q) {
   const hits = new Set(), qm = q.replace(/[^0-9a-f]/g, '');
@@ -1156,47 +1199,32 @@ function buildMap() {
   for (const n of vis) box.set(n, { n, d: S.devices[n], rows: new Map(), col: 0, x: 0, y: 0, h: 0 });
   for (const k of links) for (const e of ['a', 'b']) { const [dn, pn] = splitRef(k[e]); const b = box.get(dn); if (!b.rows.has(pn)) b.rows.set(pn, { pn, links: [], y: 0, side: 1 }); b.rows.get(pn).links.push(k); }
   for (const b of box.values()) b.h = M.HEAD + b.rows.size * M.ROW + (b.rows.size ? 6 : 0);
-  /* 3. columns: 0 left devices · 1 left adapters · 2 infrastructure · 3 right adapters · 4 right devices */
-  const groups = new Map();
-  for (const b of box.values()) {
-    if (isInfra(b.d)) { b.col = 2; continue; }
-    if (passMode(b.n)) { b.pass = true; continue; }
-    const g = b.d.project || '';
-    b.col = IX.projSide[g] === 'R' ? 4 : 0;
-    push(groups, g, b);
-  }
-  const peers = b => { const o = []; for (const r of b.rows.values()) for (const k of r.links) for (const e of ['a', 'b']) { const dn = refDev(k[e]); if (dn !== b.n) o.push(box.get(dn)); } return o; };
-  for (const b of box.values()) if (b.pass) {
-    let s = b.d.project ? IX.projSide[b.d.project] : '';
-    if (!s) { let v = 0; for (const o of peers(b)) v += o.col === 0 || o.col === 1 ? 1 : o.col >= 3 ? -1 : 0; s = v < 0 ? 'R' : 'L'; }
-    b.col = s === 'R' ? 3 : 1;
-  }
+  /* 3. columns by role; devices stacked by project, everything else level with what it connects */
+  for (const b of box.values()) b.col = mapCol(b.n);
   const colX = c => M.PADX + c * (M.W + M.COLGAP);
-  const bands = [];
-  for (const side of ['L', 'R']) {
+  const peers = b => { const o = []; for (const r of b.rows.values()) for (const k of r.links) for (const e of ['a', 'b']) { const dn = refDev(k[e]); if (dn !== b.n) o.push(box.get(dn)); } return o; };
+  const bands = [], placed = new Set();
+  { const groups = new Map();
+    for (const b of box.values()) if (b.col === 2) push(groups, b.d.project || '', b);
     let y = M.TOP;
-    for (const g of [...groups.keys()].sort(natCmp)) {
-      if ((IX.projSide[g] || 'L') !== side) continue;
+    for (const g of [...groups.keys()].sort((a, b) => (a === '') - (b === '') || natCmp(a, b))) {
       const bs = groups.get(g).sort((p, q) => natCmp(p.n, q.n)), y0 = y;
       y += M.BAND;
-      for (const b of bs) { b.x = colX(b.col); b.y = y; y += b.h + M.GAPY; }
-      bands.push({ g, x: colX(side === 'L' ? 0 : 4) - 6, y: y0, w: M.W + 12, h: y - y0 - M.GAPY + 7 });
+      for (const b of bs) { b.x = colX(2); b.y = y; y += b.h + M.GAPY; placed.add(b); }
+      bands.push({ g, x: colX(2) - 6, y: y0, w: M.W + 12, h: y - y0 - M.GAPY + 7 });
       y += 14;
-    }
-  }
-  { let y = M.TOP + M.BAND;
-    const bs = [...box.values()].filter(b => b.col === 2).sort((p, q) => infraOrd(p.d) - infraOrd(q.d) || natCmp(p.n, q.n));
-    for (const b of bs) { b.x = colX(2); b.y = y; y += b.h + M.GAPY; } }
-  for (const c of [1, 3]) {                                   // pass-through devices sit level with what they connect
-    const bs = [...box.values()].filter(b => b.col === c), want = new Map(), outer = c === 1 ? 0 : 4;
-    for (const b of bs) { const ys = peers(b).filter(o => o.col === outer).map(o => o.y + o.h / 2); if (ys.length) want.set(b, avg(ys)); }
-    for (const b of bs) if (!want.has(b)) { const ys = peers(b).map(o => (want.has(o) ? want.get(o) : o.col !== c ? o.y + o.h / 2 : null)).filter(v => v != null); want.set(b, ys.length ? avg(ys) : 0); }
-    bs.sort((p, q) => want.get(p) - want.get(q) || natCmp(p.n, q.n));
+    } }
+  for (const c of [1, 3, 0, 4]) {                              // nearest columns first: each box at the barycentre of its peers
+    const bs = [...box.values()].filter(b => b.col === c), want = new Map();
+    for (const b of bs) { const ys = peers(b).filter(o => placed.has(o)).map(o => o.y + o.h / 2); if (ys.length) want.set(b, avg(ys)); }
+    for (let pass = 0; pass < 3; pass++) for (const b of bs) if (!want.has(b)) { const ys = peers(b).filter(o => want.has(o)).map(o => want.get(o)); if (ys.length) want.set(b, avg(ys)); }
+    bs.sort((p, q) => (want.has(p) ? want.get(p) : 1e9) - (want.has(q) ? want.get(q) : 1e9) || natCmp(p.n, q.n));
     let y = M.TOP + M.BAND;
-    for (const b of bs) { b.x = colX(c); b.y = Math.max(y, Math.round(want.get(b) - b.h / 2)); y = b.y + b.h + 6; }
+    for (const b of bs) { b.x = colX(c); b.y = want.has(b) ? Math.max(y, Math.round(want.get(b) - b.h / 2)) : y; y = b.y + b.h + M.GAPY; placed.add(b); }
   }
   /* 4. rows ordered by where the other end is, and the exit side of each cable */
-  const sideFor = (b, o, k) => (o.col > b.col ? 1 : o.col < b.col ? -1 : b.col < 2 ? 1 : b.col > 2 ? -1 : k.type === 'power' ? -1 : 1);
+  /* same column: outer columns bulge outwards, inner ones towards the devices, devices by layer */
+  const sideFor = (b, o, k) => (o.col > b.col ? 1 : o.col < b.col ? -1 : b.col === 0 || b.col === 3 ? -1 : b.col === 4 || b.col === 1 ? 1 : k.type === 'power' ? -1 : 1);
   for (const b of box.values()) {
     const rows = [...b.rows.values()], me = pn => b.n + ':' + pn;
     for (const r of rows) { const k = r.links[0], o = box.get(refDev(k.a === me(r.pn) ? k.b : k.a)); r.peerY = o.y + o.h / 2; r.side = sideFor(b, o, k); }
@@ -1217,46 +1245,70 @@ function buildMap() {
     k.d = `M${x1} ${y1}C${c1} ${y1} ${c2} ${y2} ${x2} ${y2}`;
     k.mid = [Math.round((x1 + 3 * c1 + 3 * c2 + x2) / 8), Math.round((y1 + y2) / 2)];
     k.devs = [an, bn];
+    k.far = Math.abs(A.col - B.col) >= 3;
   }
   return { W, H, box, links, bands, colX };
 }
 
-function renderMap() {
-  const M = MAP, L = buildMap();
-  LAYOUT = L;
-  const q = UI.q.trim().toLowerCase(), hits = q ? searchMatch(q) : null;
+/* The map as SVG text. o.scale: 0 = fit width; o.hits: search matches; o.style: CSS to
+   embed (standalone export). */
+function mapSvg(o) {
+  const M = MAP, L = buildMap(), hits = o.hits || null;
   const selOn = (UI.sel && L.box.has(UI.sel)) || UI.selLink;
-  const o = [];
-  const scale = UI.fit ? 0 : UI.zoom;
-  o.push(`<svg xmlns="http://www.w3.org/2000/svg" class="map${selOn ? ' has-sel' : ''}" viewBox="0 0 ${L.W} ${L.H}" ${scale ? `width="${Math.round(L.W * scale)}" height="${Math.round(L.H * scale)}"` : 'width="100%"'} data-act="map-bg" role="img" aria-label="Map of devices and cables">`);
-  o.push(`<rect class="bg" width="${L.W}" height="${L.H}"/>`);
-  ['Devices', 'Adapters', 'Infrastructure', 'Adapters', 'Devices'].forEach((t, i) => o.push(`<text class="cap" x="${L.colX(i)}" y="12">${t}</text>`));
-  for (const b of L.bands) o.push(`<rect class="band" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="6"/><text class="bandt" x="${b.x + 8}" y="${b.y + 15}">${esc(trunc(b.g || 'No project', 20))}</text>`);
+  const out = [];
+  out.push(`<svg xmlns="http://www.w3.org/2000/svg" class="map${selOn ? ' has-sel' : ''}" viewBox="0 0 ${L.W} ${L.H}" ${o.scale ? `width="${Math.round(L.W * o.scale)}" height="${Math.round(L.H * o.scale)}"` : 'width="100%"'} data-act="map-bg" role="img" aria-label="Map of devices and cables">`);
+  if (o.style) out.push('<style>' + o.style.replace(/</g, '&lt;') + '</style>');
+  out.push(`<rect class="bg" width="${L.W}" height="${L.H}"/>`);
+  MAP_COLS.forEach((t, i) => out.push(`<text class="cap" x="${L.colX(i)}" y="12">${t}</text>`));
+  for (const b of L.bands) out.push(`<rect class="band" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="6"/><text class="bandt" x="${b.x + 8}" y="${b.y + 15}">${esc(trunc(b.g || 'No project', 20))}</text>`);
   const tags = [];
   for (const k of L.links) {
     const hl = (UI.sel && k.devs.includes(UI.sel)) || (UI.selLink && k.id === UI.selLink);
     const dim = hits && !hits.has(k.devs[0]) && !hits.has(k.devs[1]);
-    o.push(`<g class="lk ln-${k.type}${hl ? ' hl' : ''}${dim ? ' dim' : ''}" data-act="cable" data-id="${esc(k.id)}"><path class="v" d="${k.d}"/><path class="hit" d="${k.d}"/></g>`);
+    out.push(`<g class="lk ln-${k.type}${k.far ? ' far' : ''}${hl ? ' hl' : ''}${dim ? ' dim' : ''}" data-act="cable" data-id="${esc(k.id)}"><path class="v" d="${k.d}"/><path class="hit" d="${k.d}"/></g>`);
     if (hl && k.id) tags.push(k);
   }
   for (const b of L.box.values()) {
     const d = b.d, t0 = d.types[0], ip = firstIp(d), iss = IX.issueDev.get(b.n);
-    const cls = ['dev', b.col === 2 ? 'infra' : '', b.pass ? 'pass' : '', UI.sel === b.n ? 'sel' : '', hits ? (hits.has(b.n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
-    o.push(`<g class="${cls}" data-act="dev" data-dev="${esc(b.n)}" data-map="1" transform="translate(${b.x} ${b.y})"><rect class="bx" width="${M.W}" height="${b.h}" rx="5"/>`);
-    o.push(`<text class="nm" x="7" y="13">${esc(trunc(b.n, 19))}</text><text class="sb" x="7" y="24">${esc(trunc(((TYPES[t0] && TYPES[t0].tag) || t0) + (ip ? ' · ' + ip : ''), 26))}</text>`);
-    if (iss) o.push(`<circle class="i-${iss}" cx="${M.W - 9}" cy="9" r="4"/>`);
-    if (b.rowList.length) o.push(`<line class="sep" x1="0" x2="${M.W}" y1="${M.HEAD - 1}" y2="${M.HEAD - 1}"/>`);
+    const cls = ['dev', b.col === 0 || b.col === 4 ? 'infra' : '', b.col === 3 ? 'pass' : '', UI.sel === b.n ? 'sel' : '', hits ? (hits.has(b.n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
+    out.push(`<g class="${cls}" data-act="dev" data-dev="${esc(b.n)}" data-col="${b.col}" data-map="1" transform="translate(${b.x} ${b.y})"><rect class="bx" width="${M.W}" height="${b.h}" rx="5"/>`);
+    out.push(`<text class="nm" x="7" y="13">${esc(trunc(b.n, 19))}</text><text class="sb" x="7" y="24">${esc(trunc(((TYPES[t0] && TYPES[t0].tag) || t0) + (ip ? ' · ' + ip : ''), 26))}</text>`);
+    if (iss) out.push(`<circle class="i-${iss}" cx="${M.W - 9}" cy="9" r="4"/>`);
+    if (b.rowList.length) out.push(`<line class="sep" x1="0" x2="${M.W}" y1="${M.HEAD - 1}" y2="${M.HEAD - 1}"/>`);
     for (const r of b.rowList) {
       const right = r.side > 0, ry = r.y - b.y;
-      o.push(`<text class="pt${IX.ports.has(b.n + ':' + r.pn) ? '' : ' bad'}" x="${right ? M.W - 7 : 7}" y="${ry + 3}" text-anchor="${right ? 'end' : 'start'}">${esc(trunc(r.pn, 18))}</text><circle class="pf-${r.links[0].type}" cx="${right ? M.W : 0}" cy="${ry}" r="2.6"/>`);
+      out.push(`<text class="pt${IX.ports.has(b.n + ':' + r.pn) ? '' : ' bad'}" x="${right ? M.W - 7 : 7}" y="${ry + 3}" text-anchor="${right ? 'end' : 'start'}">${esc(trunc(r.pn, 18))}</text><circle class="pf-${r.links[0].type}" cx="${right ? M.W : 0}" cy="${ry}" r="2.6"/>`);
     }
-    o.push('</g>');
+    out.push('</g>');
   }
-  for (const k of tags) { const w = k.id.length * 5.4 + 8; o.push(`<g class="ltag" data-act="cable" data-id="${esc(k.id)}"><rect x="${k.mid[0] - w / 2}" y="${k.mid[1] - 7}" width="${w}" height="13" rx="2"/><text x="${k.mid[0]}" y="${k.mid[1] + 3}" text-anchor="middle">${esc(k.id)}</text></g>`); }
-  o.push('</svg>');
-  $('#map').innerHTML = o.join('');
+  for (const k of tags) { const w = k.id.length * 5.4 + 8; out.push(`<g class="ltag" data-act="cable" data-id="${esc(k.id)}"><rect x="${k.mid[0] - w / 2}" y="${k.mid[1] - 7}" width="${w}" height="13" rx="2"/><text x="${k.mid[0]}" y="${k.mid[1] + 3}" text-anchor="middle">${esc(k.id)}</text></g>`); }
+  out.push('</svg>');
+  return { svg: out.join(''), L };
+}
+function renderMap() {
+  const q = UI.q.trim().toLowerCase(), hits = q ? searchMatch(q) : null;
+  const r = mapSvg({ scale: UI.fit ? 0 : UI.zoom, hits }), L = r.L;
+  LAYOUT = L;
+  $('#map').innerHTML = r.svg;
   $('#map-hint').textContent = IX.names.length ? `${plural(L.box.size, 'device')} · ${plural(L.links.length, 'cable')}` + (hits ? ` · ${hits.size} ${hits.size === 1 ? 'match' : 'matches'}` : '') : 'No devices. Edit > + Device, or Data > Load example.';
   if (UI.center) { const n = UI.center; UI.center = null; centerOn(n); }
+}
+/* The whole map (every layer, no filter, no selection) as a standalone SVG file, with
+   the page's map styles embedded and resolved to the light theme. */
+function mapCss() {
+  const root = document.documentElement, had = root.getAttribute('data-theme');
+  root.setAttribute('data-theme', 'light');
+  const cs = getComputedStyle(root), out = [];
+  for (const sh of document.styleSheets) { let rules = []; try { rules = sh.cssRules; } catch (e) {} for (const r of rules) if (r.selectorText && /svg\.map|\.ln-|\.pf-/.test(r.selectorText)) out.push(r.cssText); }
+  const css = out.join('\n').replace(/var\((--[\w-]+)\)/g, (m, v) => cs.getPropertyValue(v).trim() || m);
+  if (had == null) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', had);
+  return css;
+}
+function exportMapSvg() {
+  const keep = { layers: UI.layers, project: UI.project, sel: UI.sel, selLink: UI.selLink };
+  UI.layers = {}; for (const k of LAYER_KEYS) UI.layers[k] = true;
+  UI.project = ''; UI.sel = UI.selLink = null;
+  try { return mapSvg({ scale: 1, style: mapCss() }).svg; } finally { Object.assign(UI, keep); }
 }
 function centerOn(name) {
   const b = LAYOUT && LAYOUT.box.get(name), w = $('#mapwrap'), svg = $('#map svg');
@@ -1291,10 +1343,14 @@ function renderDevices() {
   $('#dev-list').innerHTML = h || '<p class="mut">No results.</p>';
 }
 
+/* Cables that pass the filter of the Cables tab, by id. */
+function shownCables() {
+  const q = UI.cq.trim().toLowerCase();
+  return S.links.filter(l => (!UI.clayer || linkLayer(l) === UI.clayer) && (!q || (l.id + ' ' + l.a + ' ' + l.b + ' ' + (l.notes || '')).toLowerCase().includes(q))).sort((a, b) => natCmp(a.id, b.id));
+}
 function renderCables() {
   fillSelect($('#c-layer'), [['', 'All layers']].concat(LAYER_KEYS.map(k => [k, LAYERS[k].label])), UI.clayer);
-  const q = UI.cq.trim().toLowerCase();
-  const ls = S.links.filter(l => (!UI.clayer || linkLayer(l) === UI.clayer) && (!q || (l.id + ' ' + l.a + ' ' + l.b + ' ' + (l.notes || '')).toLowerCase().includes(q))).sort((a, b) => natCmp(a.id, b.id));
+  const ls = shownCables();
   let h = `<p class="mut">${ls.length} of ${plural(S.links.length, 'cable')}</p><div class="list">`;
   for (const l of ls.slice(0, 600)) h += `<button class="item" data-act="cable" data-id="${esc(l.id)}"><span class="tag">${esc(l.id || '?')}</span><span class="k k-${linkLayer(l)}">${LAYERS[linkLayer(l)].label}</span><span class="mono">${esc(l.a)} ${l.type === 'power' ? '→' : '↔'} ${esc(l.b)}</span>${l.notes ? `<span class="sub">${esc(l.notes)}</span>` : ''}</button>`;
   h += '</div>' + (ls.length > 600 ? '<p class="mut">First 600 shown. Filter to see more.</p>' : '');
@@ -1360,6 +1416,17 @@ function renderIps() {
     h += `<h3>In use in ${esc(vn)} (${rows.length})</h3><div class="list">`;
     for (const r of rows) h += `<div class="item"><button class="linkb" data-act="ip" data-v="${esc(vn)}" data-ip="${r.n}">${intToIp(r.n)}${r.to !== r.n ? '–' + intToIp(r.to) : ''}</button>${r.st === 'conf' ? '<i class="dot err"></i>' : ''}<span>${r.h}</span><span class="sub">${r.note}</span></div>`;
     h += (rows.length ? '' : '<div class="item mut">Nothing in use.</div>') + '</div>';
+    /* members: every port in this VLAN, switch ports first */
+    const mem = [];
+    for (const [ref, P] of IX.ports) {
+      const tagged = (P.p.vlans || []).includes(vn);
+      if (P.p.vlan !== vn && !tagged) continue;
+      mem.push({ ref, tagged, sw: P.d.types.some(t => t === 'switch' || t === 'router'), ip: P.p.ip || '', peers: linksOf(ref).map(l => (l.a === ref ? l.b : l.a)) });
+    }
+    mem.sort((a, b) => b.sw - a.sw || natCmp(a.ref, b.ref));
+    h += `<h3>Members of ${esc(vn)} (${mem.length})</h3><div class="list">`;
+    for (const m of mem) h += `<div class="item">${refBtn(m.ref)}<span class="chip">${m.tagged ? 'tagged' : m.sw ? 'access' : 'interface'}</span><span class="mono">${esc(m.ip)}</span><span class="sub">${m.peers.length ? '↔ ' + m.peers.map(esc).join(', ') : 'no cable'}</span></div>`;
+    h += (mem.length ? '' : '<div class="item mut">No ports in this VLAN.</div>') + '</div>';
   } else h += '<p class="mut">No VLANs.</p>';
   const lost = IX.ip[''];
   if (lost && lost.fixed.size) h += '<h3>IPs without a VLAN</h3><div class="list">' + [...lost.fixed].map(([n, refs]) => `<div class="item"><span class="mono">${intToIp(n)}</span><span>${refs.map(refBtn).join(', ')}</span></div>`).join('') + '</div>';
@@ -1398,7 +1465,7 @@ function renderCatalog() {
 function renderData() {
   const mode = { server: 'Server (data-do-not-edit/)', local: 'Local, not saved', offline: 'Offline', boot: 'Starting…' }[NET.mode];
   let h = '<div class="cards">';
-  h += `<div class="card"><h4>Lab</h4><p class="mut">${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')} · ${plural(Object.keys(S.vlans).length, 'VLAN')}</p><div class="row"><button class="btn" data-act="export" data-k="lab">Export</button><button class="btn ed" data-act="import" data-k="lab">Import</button><button class="btn ed" data-act="example">Load example</button></div></div>`;
+  h += `<div class="card"><h4>Lab</h4><p class="mut">${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')} · ${plural(Object.keys(S.vlans).length, 'VLAN')}</p><div class="row"><button class="btn" data-act="export" data-k="lab">Export</button><button class="btn ed" data-act="import" data-k="lab">Import</button><button class="btn ed" data-act="example">Load example</button></div><div class="row" style="margin-top:8px"><button class="btn sm" data-act="export" data-k="svg">Map SVG</button><button class="btn sm" data-act="export" data-k="report">Report HTML</button>${NET.mode === 'server' ? '<button class="btn sm" data-act="backups">Backups</button>' : ''}</div></div>`;
   h += `<div class="card"><h4>Catalog</h4><p class="mut">${plural(Object.keys(CAT.templates).length, 'template')} · ${plural(Object.keys(CAT.portTypes).length, 'port type')}</p><div class="row"><button class="btn" data-act="export" data-k="cat">Export</button><button class="btn ed" data-act="import" data-k="cat">Import</button></div></div></div>`;
   h += `<dl class="kv" style="margin-top:14px"><dt>Storage</dt><dd>${mode}</dd><dt>Revision</dt><dd>${S.rev}</dd><dt>User</dt><dd><b class="mono">${esc(UI.user || '—')}</b> <button class="btn sm" data-act="user">Change</button></dd><dt>Version</dt><dd>${VERSION}</dd></dl>`;
   const log = S.log.slice().reverse();
@@ -1502,7 +1569,7 @@ function devSheet(name) {
       h += `<h3>Ports (${d.ports.length})</h3><div class="tw"><table class="pt"><thead><tr><th>Port</th><th>Connection</th><th>Cable</th>${net ? '<th>IP</th><th>VLAN</th>' : ''}</tr></thead><tbody>`;
       for (const p of d.ports) {
         const ref = name + ':' + p.name, ls = linksOf(ref);
-        h += `<tr class="pr${open.has(p.name) ? ' open' : ''}" data-act="p-tog" data-p="${esc(p.name)}"><td><b class="mono">${esc(p.name)}</b><br>${kindChip(p.kind)}</td><td class="mono">${ls.map(l => esc(l.a === ref ? l.b : l.a)).join('<br>') || '<span class="mut">' + (p.virtual ? '—' : 'free') + '</span>'}</td><td>${ls.map(l => `<span class="tag">${esc(l.id)}</span>`).join('<br>')}</td>${net ? `<td class="mono">${esc(p.ip || '')}</td><td>${esc(p.vlan || '')}</td>` : ''}</tr>`;
+        h += `<tr class="pr${open.has(p.name) ? ' open' : ''}" data-act="p-tog" data-p="${esc(p.name)}"><td><b class="mono">${esc(p.name)}</b><br>${kindChip(p.kind)}</td><td class="mono">${ls.map(l => esc(l.a === ref ? l.b : l.a)).join('<br>') || '<span class="mut">' + (p.virtual ? '—' : 'free') + '</span>'}</td><td>${ls.map(l => `<span class="tag">${esc(l.id)}</span>`).join('<br>')}</td>${net ? `<td class="mono">${esc(p.ip || '')}</td><td>${esc(p.vlan || '')}${p.vlans ? '<br><span class="mut">+ ' + esc(p.vlans.join(', ')) + '</span>' : ''}</td>` : ''}</tr>`;
         if (!open.has(p.name)) continue;
         h += `<tr class="pd"><td colspan="${cols}">`;
         const kv2 = [['MAC', p.mac], ['Services', p.services], ['Notes', p.notes]].filter(x => x[1]);
@@ -1568,10 +1635,10 @@ function wizDevice(o) {
       location: src ? src.location : '', notes: src ? src.notes : '', admin: src ? src.admin : '', expectedPower: src ? src.expectedPower : 'none' },
     portsText: src ? portsToText(src.ports) : '', meta: {}, open: new Set()
   };
-  if (src) for (const p of src.ports) w.meta[p.name] = { vlan: p.vlan || '', ip: cur ? p.ip || '' : '', mac: cur ? p.mac || '' : '', services: p.services || '', notes: p.notes || '' };
+  if (src) for (const p of src.ports) w.meta[p.name] = { vlan: p.vlan || '', vlans: (p.vlans || []).join(', '), ip: cur ? p.ip || '' : '', mac: cur ? p.mac || '' : '', services: p.services || '', notes: p.notes || '' };
   const qty = () => Math.max(1, Math.min(50, +w.qty || 1));
   const names = () => genNames(w.pattern, qty());
-  const metaOf = n => w.meta[n] || (w.meta[n] = { vlan: '', ip: '', mac: '', services: '', notes: '' });
+  const metaOf = n => w.meta[n] || (w.meta[n] = { vlan: '', vlans: '', ip: '', mac: '', services: '', notes: '' });
   const prevHtml = () => {
     if (w.edit) return '';
     const nm = names();
@@ -1586,7 +1653,7 @@ function wizDevice(o) {
       h += `<div class="pbox"><button class="ph" data-act="w-port" data-p="${esc(p.name)}"><b class="mono">${esc(p.name)}</b>${kindChip(p.kind)}<span class="mono mut">${esc(net ? [m.ip, m.vlan].filter(Boolean).join(' · ') : '')}</span></button>`;
       if (w.open.has(p.name)) h += '<div class="pbd">' + (net ? '<div class="g2">' + fld('VLAN', `<select data-f="${esc(key)}vlan">${opt('', '—', m.vlan)}${vl.map(v => opt(v, v, m.vlan)).join('')}</select>`) +
         `<div class="fld"><span>IP</span><span class="inl">${inp(key + 'ip', m.ip, 'inputmode="decimal" aria-label="IP"')}<button class="btn sm" data-act="w-free" data-p="${esc(p.name)}">free</button></span></div>` +
-        fld('MAC', inp(key + 'mac', m.mac)) + fld('Services', inp(key + 'services', m.services)) + '</div>' : '') + fld('Notes', inp(key + 'notes', m.notes)) + '</div>';
+        fld('MAC', inp(key + 'mac', m.mac)) + fld('Services', inp(key + 'services', m.services)) + '</div>' + fld('Tagged VLANs (trunk), comma separated', inp(key + 'vlans', m.vlans || '')) : '') + fld('Notes', inp(key + 'notes', m.notes)) + '</div>';
       h += '</div>';
     }
     return h;
@@ -1596,6 +1663,8 @@ function wizDevice(o) {
     const m = w.meta[p.name] || {}, q = { name: p.name, kind: p.kind };
     if (p.virtual) q.virtual = true;
     for (const k of isNetKind(p.kind) ? ['ip', 'mac', 'vlan', 'services', 'notes'] : ['notes']) { const v = String(m[k] || '').trim(); if (v) q[k] = v; }
+    const tg = isNetKind(p.kind) ? String(m.vlans || '').split(/[\s,]+/).filter(Boolean) : [];
+    if (tg.length) q.vlans = tg;
     return q;
   });
 
@@ -1673,7 +1742,7 @@ function wizDevice(o) {
       const t = CAT.templates[w.tpl];
       if (!t) return;
       w.f.types = t.types.slice(); w.pattern = t.pattern; w.portsText = t.ports.join('\n'); w.f.expectedPower = t.power; w.f.admin = t.admin || ''; w.f.model = t.model || ''; w.f.notes = t.notes || ''; w.meta = {}; w.open.clear();
-      for (const pn of Object.keys(t.meta || {})) w.meta[pn] = Object.assign({ vlan: '', ip: '', mac: '', services: '', notes: '' }, t.meta[pn]);
+      for (const pn of Object.keys(t.meta || {})) w.meta[pn] = Object.assign({ vlan: '', vlans: '', ip: '', mac: '', services: '', notes: '' }, t.meta[pn]);
     },
     partial() { const a = $('#w-prev'), b = $('#w-ports'); if (a) a.innerHTML = prevHtml(); if (b) b.innerHTML = portsHtml(); },
     on: {
@@ -1744,7 +1813,7 @@ function devOk(n, f, ignoreId) {
 function wizLink(o) {
   o = o || {};
   const L = o.edit ? S.links.find(l => l.id === o.edit) : null;
-  const w = { edit: L ? L.id : null, sc: 'free', strict: !L, a: { dev: '', port: '' }, b: { dev: '', port: '' }, type: L ? L.type : 'auto', id: L ? L.id : '', idManual: !!L, notes: L ? L.notes || '' : '', pin: '', hold: '' };
+  const w = { edit: L ? L.id : null, sc: 'free', strict: !L, a: { dev: '', port: '' }, b: { dev: '', port: '' }, type: L ? L.type : 'auto', id: L ? L.id : '', idManual: !!L, notes: L ? L.notes || '' : '', pin: '', hold: '', count: 1 };
   if (L) { [w.a.dev, w.a.port] = splitRef(L.a); [w.b.dev, w.b.port] = splitRef(L.b); }
   else if (o.from && IX.ports.has(o.from)) {
     const [dn, pn] = splitRef(o.from), P = IX.ports.get(o.from), lay = layerOf(P.p.kind), t = P.d.types;
@@ -1786,6 +1855,39 @@ function wizLink(o) {
     if (!id) out.push('No id.'); else if (S.links.some(l => l.id === id && l.id !== w.edit)) out.push(`Id ${id} already used.`);
     return out;
   };
+  const count = () => (w.edit ? 1 : Math.max(1, Math.min(96, +w.count || 1)));
+  /* consecutive ports of the same type after the chosen one (only free ones when strict) */
+  const seq = (end, n) => {
+    const e = w[end], d = S.devices[e.dev];
+    if (!d || !e.port) return [];
+    const i = d.ports.findIndex(p => p.name === e.port), out = [e.port];
+    if (i < 0) return [];
+    for (let j = i + 1; j < d.ports.length && out.length < n; j++) { const p = d.ports[j]; if (p.kind !== d.ports[i].kind || p.virtual || (w.strict && !portOk(e.dev, p, {}, w.edit))) continue; out.push(p.name); }
+    return out;
+  };
+  const pairs = () => { const n = count(), A = seq('a', n), B = seq('b', n), k = Math.min(A.length, B.length); return Array.from({ length: k }, (_, i) => [w.a.dev + ':' + A[i], w.b.dev + ':' + B[i]]); };
+  const warnHtml = () => {
+    const warn = m => `<div class="iss warn"><b>Warning</b><span>${esc(m)}</span></div>`, n = count();
+    let h = warns().map(warn).join('');
+    if (n > 1) { const ps = pairs(); if (ps.length < n) h += warn(`Only ${ps.length} consecutive ports available.`); h += `<p class="lbl">${plural(ps.length, 'cable')}</p><div class="chain">` + ps.slice(0, 6).map(p => esc(p[0]) + ' ↔ ' + esc(p[1])).join('<br>') + (ps.length > 6 ? '<br>…' : '') + '</div>'; }
+    return h;
+  };
+  const doSave = keepOpen => {
+    if (!NET.editing) return toast('Edit mode required.');
+    const ps = pairs();
+    if (!ps.length) return toast('Ends missing.');
+    const type = resType(), notes = String(w.notes || '').trim();
+    let ok;
+    if (w.edit) { const id = curId() || nextCableId(type), [a, b] = ps[0]; ok = commit(`Cable ${id} changed: ${a} ↔ ${b}`, s => { Object.assign(s.links.find(x => x.id === w.edit), { id, type, a, b, notes }); }); }
+    else {
+      const taken = new Set(), ids = ps.map((p, i) => { const id = (i === 0 && curId()) || nextCableId(type, taken); taken.add(id); return id; });
+      ok = commit(ps.length === 1 ? `Cable ${ids[0]}: ${ps[0][0]} ↔ ${ps[0][1]}` : `${ps.length} cables ${ids[0]}…${ids[ids.length - 1]}: ${w.a.dev} ↔ ${w.b.dev}`, s => { ps.forEach((p, i) => s.links.push({ id: ids[i], type, a: p[0], b: p[1], notes })); });
+    }
+    if (!ok) return;
+    if (w.edit) closeDlg(true);
+    else if (keepOpen) { w.a.port = ''; w.b.port = ''; w.hold = ''; w.id = ''; w.idManual = false; fix(); renderDlg(); }      // same devices, next free ports
+    else closeDlg();
+  };
   const endHtmlSel = (end, label) => {
     const e = w[end], f = filt(end);
     let devs = w.strict ? IX.names.filter(n => devOk(n, f, w.edit)) : IX.names.slice();
@@ -1805,25 +1907,18 @@ function wizLink(o) {
       h += `<label class="tog"><input type="checkbox" data-f="strict"${w.strict ? ' checked' : ''}> Only free, compatible ports</label>`;
       h += endHtmlSel('a', pow ? 'From (outlet)' : 'From') + endHtmlSel('b', pow ? 'To (inlet)' : 'To');
       h += '<div class="g2">' + fld('Cable type', `<select data-f="type">${opt('auto', 'Auto: ' + LAYERS[autoType()].label, w.type)}${LAYER_KEYS.map(k => opt(k, LAYERS[k].label, w.type)).join('')}</select>`) + fld('Id (label)', inp('id', curId())) + '</div>';
-      h += fld('Note', inp('notes', w.notes));
-      return h + '<div id="w-warn">' + warns().map(m => `<div class="iss warn"><b>Warning</b><span>${esc(m)}</span></div>`).join('') + '</div>';
+      h += '<div class="g2">' + fld('Note', inp('notes', w.notes)) + (w.edit ? '' : fld('How many (consecutive ports)', `<input type="number" inputmode="numeric" min="1" max="96" data-f="count" data-re value="${esc(w.count)}">`)) + '</div>';
+      return h + '<div id="w-warn">' + warnHtml() + '</div>';
     },
-    foot: () => `<button class="btn" data-act="dlg-back">Cancel</button>${w.edit ? '<button class="btn dan" data-act="del">Remove</button>' : ''}<button class="btn pri" data-act="save">${w.edit ? 'Save' : 'Connect'}</button>`,
+    foot: () => `<button class="btn" data-act="dlg-back">Cancel</button>${w.edit ? '<button class="btn dan" data-act="del">Remove</button>' : ''}${w.edit ? '' : '<button class="btn" data-act="next">Connect + next</button>'}<button class="btn pri" data-act="save">${w.edit ? 'Save' : 'Connect'}</button>`,
+    partial() { const a = $('#w-warn'); if (a) a.innerHTML = warnHtml(); },
     set(f, v) { const p = f.split('|'); if (p.length === 2) { w[p[0]][p[1]] = v; if (p[1] === 'dev') w[p[0]].port = ''; if (p[0] === w.hold) w.hold = ''; } else { w[f] = v; if (f === 'id') w.idManual = true; } },
     fix,
     on: {
       'w-sc': el => { w.sc = el.dataset.k; w.hold = ''; for (const e of ['a', 'b']) if (e !== w.pin) w[e] = { dev: '', port: '' }; fix(); renderDlg(); },
       del: () => { const l = S.links.find(x => x.id === w.edit); if (l && commit(`Cable ${l.id} removed (${l.a} ↔ ${l.b})`, s => { s.links = s.links.filter(x => x !== l); })) closeDlg(true); },
-      save: () => {
-        if (!NET.editing) return toast('Edit mode required.');
-        const a = ref('a'), b = ref('b');
-        if (!a || !b) return toast('Ends missing.');
-        const type = resType(), id = curId() || nextCableId(type), notes = String(w.notes || '').trim();
-        const ok = commit(w.edit ? `Cable ${id} changed: ${a} ↔ ${b}` : `Cable ${id}: ${a} ↔ ${b}`, s => {
-          if (w.edit) Object.assign(s.links.find(x => x.id === w.edit), { id, type, a, b, notes }); else s.links.push({ id, type, a, b, notes });
-        });
-        if (ok) { if (w.edit) closeDlg(true); else closeDlg(); }
-      }
+      save: () => doSave(false),
+      next: () => doSave(true)
     }
   });
 }
@@ -1931,14 +2026,74 @@ function vlanDlg(name) {
 
 /* ---------- Data: export and import the two layers (lab and catalog) ---------- */
 const LAYER_FILE = { lab: 'lab.yaml', cat: 'catalog.yaml' };
-function exportDlg(kind) {
-  const text = kind === 'cat' ? toCatalogYaml(S.catalog) : toYaml(S);
+function fileDlg(name, text) {
   openDlg({
-    title: LAYER_FILE[kind],
+    title: name,
     body: () => `<textarea id="exp" readonly rows="16" wrap="off" spellcheck="false">${esc(text)}</textarea>`,
     foot: () => '<button class="btn" data-act="cp">Copy</button><button class="btn pri" data-act="dl">Save file</button>',
-    on: { cp: () => copyText(text, $('#exp')), dl: () => saveFile(LAYER_FILE[kind], text) }
+    on: { cp: () => copyText(text, $('#exp')), dl: () => saveFile(name, text) }
   });
+}
+/* One row per cable, for a label printer: the id goes on both ends. */
+function labelsCsv(ls) {
+  const q = v => (/[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+  return ['id,layer,from_device,from_port,to_device,to_port,notes'].concat(ls.map(l => [l.id, linkLayer(l)].concat(splitRef(l.a), splitRef(l.b), [l.notes || '']).map(x => q(String(x))).join(','))).join('\r\n') + '\r\n';
+}
+/* A static, self-contained page: the map and the tables. Print it to get a PDF. */
+function reportHtml() {
+  const table = (head, rows) => '<table><thead><tr>' + head.map(x => `<th>${x}</th>`).join('') + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(c => `<td>${esc(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+  const devs = IX.names.map(n => { const d = S.devices[n]; return [n, d.types.map(typeLabel).join(', '), d.project, d.model, d.serial, d.location, d.owner, d.ports.filter(p => p.ip).map(p => p.name + ' ' + p.ip + (p.vlan ? ' (' + p.vlan + ')' : '')).join(', '), switchesOf(n).join(', '), d.notes]; });
+  const cabs = S.links.slice().sort((a, b) => natCmp(a.id, b.id)).map(l => [l.id, LAYERS[linkLayer(l)].label, l.a, l.b, l.notes]);
+  const vl = Object.keys(S.vlans).sort(natCmp).map(v => { const x = S.vlans[v], c = parseCidr(x.subnet); return [v, x.id == null ? '' : x.id, x.subnet || '', c ? maskOf(c) : '', x.gateway || '', x.dns || '', x.notes || '']; });
+  const notes = S.ipUse.map(e => [e.vlan || '', e.from + (e.to ? '–' + e.to : ''), e.who || '', e.iface || '', e.notes || '']);
+  return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>Labmap report · rev ' + S.rev + '</title><style>body{font:13px system-ui,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0}h2{font-size:15px;margin:28px 0 8px}p{color:#555}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}th{background:#eee}svg{max-width:100%;height:auto}@media print{body{margin:0}h2{break-after:avoid}tr{break-inside:avoid}}</style></head><body>' +
+    `<h1>Labmap report</h1><p>rev ${S.rev} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC · ${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')}</p>` +
+    '<h2>Map</h2>' + exportMapSvg() + '<h2>Devices</h2>' + table(['Name', 'Type', 'Project', 'Model', 'Serial', 'Location', 'Owner', 'IPs', 'Switched by', 'Notes'], devs) +
+    '<h2>Cables</h2>' + table(['Id', 'Layer', 'From', 'To', 'Notes'], cabs) + '<h2>VLANs</h2>' + table(['Name', 'Id', 'Subnet', 'Netmask', 'Gateway', 'DNS', 'Notes'], vl) +
+    '<h2>IP notes</h2>' + table(['VLAN', 'Address', 'User', 'Interface', 'Notes'], notes) + '</body></html>\n';
+}
+function exportDlg(kind) {
+  const make = { lab: () => [LAYER_FILE.lab, toYaml(S)], cat: () => [LAYER_FILE.cat, toCatalogYaml(S.catalog)], labels: () => ['cable-labels.csv', labelsCsv(shownCables())], svg: () => ['labmap.svg', exportMapSvg()], report: () => ['labmap-report.html', reportHtml()] }[kind];
+  if (!make) return;
+  if (kind === 'lab') NET.localDirty = false;
+  const f = make();
+  fileDlg(f[0], f[1]);
+}
+/* Backups kept by the server: list, look, restore (as a normal, undoable change). */
+const backupTime = t => String(t).replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)$/, '$1-$2-$3 $4:$5:$6');
+async function backupText(file) {
+  const r = await httpJson('GET', 'api/backup?file=' + encodeURIComponent(file));
+  if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status);
+  return r.j.text;
+}
+function restoreBackup(b, text) {
+  confirmDlg(`Restore the ${b.layer} as it was at rev ${b.rev} (${backupTime(b.time)})?`, () => {
+    try {
+      const obj = parseYaml(text);
+      if (b.layer === 'catalog') { const c = normCatalog(obj); if (!Object.keys(c.portTypes).length) throw new Error('portTypes missing'); if (commit(`Catalog restored from the backup of rev ${b.rev}`, s => { s.catalog = c; })) closeDlg(true); return; }
+      obj.catalog = clone(S.catalog);
+      const st = normalize(obj);
+      if (commit(`Lab restored from the backup of rev ${b.rev}`, s => { for (const k of ['vlans', 'devices', 'links', 'ipUse']) s[k] = st[k]; })) { UI.sel = UI.selLink = null; UI.project = ''; closeDlg(true); renderTab(); }
+    } catch (e) { toast('Backup not readable (' + e.message + ').', { sticky: true }); }
+  }, 'Restore', true);
+}
+function backupsDlg() {
+  const w = { list: null, err: '' };
+  const dlg = {
+    title: 'Backups',
+    body() {
+      if (w.err) return `<div class="iss err"><b>Error</b><span>${esc(w.err)}</span></div>`;
+      if (!w.list) return '<p class="mut">Loading…</p>';
+      if (!w.list.length) return '<p class="mut">No backups yet.</p>';
+      return '<div class="list">' + w.list.map((b, i) => `<div class="item"><span class="chip">${esc(b.layer)}</span><span class="mono">rev ${esc(b.rev)}</span><span class="sp mut" style="font-size:12px">${esc(backupTime(b.time))}</span><span class="sub"><button class="btn sm" data-act="view" data-i="${i}">View</button> <button class="btn sm ed" data-act="restore" data-i="${i}">Restore</button></span></div>`).join('') + '</div>';
+    },
+    on: {
+      view: async el => { const b = w.list[+el.dataset.i]; try { fileDlg(b.file, await backupText(b.file)); } catch (e) { toast('Backup not available (' + e.message + ').', { sticky: true }); } },
+      restore: async el => { const b = w.list[+el.dataset.i]; try { restoreBackup(b, await backupText(b.file)); } catch (e) { toast('Backup not available (' + e.message + ').', { sticky: true }); } }
+    }
+  };
+  openDlg(dlg);
+  httpJson('GET', 'api/backups').then(r => { if (r.status !== 200 || !r.j) throw new Error('HTTP ' + r.status); w.list = r.j.backups || []; }).catch(e => { w.err = 'Backups not available (' + e.message + ').'; }).then(() => { if (topDlg() === dlg) renderDlg(); });
 }
 function catEditDlg() {
   const w = { text: toCatalogYaml(S.catalog) };
@@ -2035,7 +2190,8 @@ const ACT = {
   'ipuse-edit': el => ipUseDlg({ i: +el.dataset.i }),
   'ipuse-del': el => { const i = +el.dataset.i, e = S.ipUse[i]; if (e) commit(`IP note ${e.from}${e.to ? '–' + e.to : ''} deleted (${e.who || '?'})`, s => { s.ipUse.splice(i, 1); }); },
   issue: el => { const d = el.dataset; if (d.link && S.links.some(l => l.id === d.link)) cableSheet(d.link); else if (d.dev && S.devices[d.dev]) devSheet(d.dev); else if (d.v) { UI.vlan = d.v; setTab('ips'); } },
-  export: el => exportDlg(el.dataset.k === 'cat' ? 'cat' : 'lab'),
+  export: el => exportDlg(el.dataset.k),
+  backups: () => backupsDlg(),
   import: el => importDlg(el.dataset.k === 'cat' ? 'cat' : 'lab'),
   'cat-edit': () => catEditDlg(),
   'tpl-del': el => { const k = el.dataset.k; if (CAT.templates[k]) commit(`Template ${k} deleted`, s => { delete s.catalog.templates[k]; }); },
@@ -2094,6 +2250,7 @@ function wire() {
   document.addEventListener('keydown', e => { NET.lastAct = Date.now(); if (e.key === 'Escape' && topDlg()) closeDlg(); });
   document.addEventListener('pointerdown', () => { NET.lastAct = Date.now(); }, { passive: true });
   window.addEventListener('hashchange', () => { const t = location.hash.slice(1); if (t && t !== UI.tab) setTab(t); });
+  window.addEventListener('beforeunload', e => { if (unsaved()) { e.preventDefault(); e.returnValue = ''; } });      // ask before losing unsaved changes
   window.addEventListener('pagehide', () => {                                      // release the lock when the page closes
     if (!NET.editing || NET.mode === 'local') return;
     try { navigator.sendBeacon('api/lock', new Blob([JSON.stringify({ holder: holder(), by: who(), ttlMs: 1000 })], { type: 'application/json' })); } catch (e) {}
@@ -2123,7 +2280,7 @@ async function boot() {
 /* Pure functions in view: for tests, for the console and for tools/ (Node). */
 const API = {
   VERSION, get state() { return S; }, get index() { return IX; }, get net() { return NET; }, get ui() { return UI; },
-  layerOf, powerDir, isNetKind, kindKey, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
+  layerOf, powerDir, isNetKind, kindKey, mapCol, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
   toYaml, toCatalogYaml, parseYaml, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
   /* load a lab without edit mode or saving (tests and console) */
   load: st => { st.catalog = st.catalog || clone(S.catalog); S = normalize(st); UNDO = null; refreshAll(); }

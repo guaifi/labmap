@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Labmap server. Needs only Python 3.7+ (standard library, nothing to install).
 
-Usage:   python3 server.py [--port 8080] [--host 0.0.0.0]
+Usage:   python3 server.py [--port 8080] [--host 0.0.0.0] [--data FOLDER]
 
-Serves the web page (index.html, app.js) and stores the data in data-do-not-edit/:
+Serves the web page (index.html, app.js) and stores the data in data-do-not-edit/
+(or in the folder given with --data, e.g. on another disk):
     data-do-not-edit/lab.yaml       devices, cables, VLANs, IPs and change log
     data-do-not-edit/catalog.yaml   port types and device templates
     data-do-not-edit/backups/       the previous version of every save
 
 The data folder is created on first run (catalog copied from defaults/catalog.yaml)
-and is git-ignored: updating the code never touches it.
+and is git-ignored: updating the code never touches it. Never publish it.
 
 API (used by app.js):
     GET  /api/state  -> { labmap, rev, lab, cat }      lab and cat are YAML text
@@ -18,6 +19,8 @@ API (used by app.js):
                      -> 200 { rev } | 409 current state (base mismatch) | 423 { by } (locked by another)
     POST /api/lock   <- { holder, by, ttlMs }           small ttlMs = release
                      -> { acquired, by, expiresAt }
+    GET  /api/backups           -> { backups: [{ file, layer, rev, time }] }   newest first
+    GET  /api/backup?file=NAME  -> { file, text }
 
 No passwords and no HTTPS: meant for the lab network. Do not expose it to the Internet.
 """
@@ -31,12 +34,11 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(BASE, 'data-do-not-edit')
-BACKUPS = os.path.join(DATA, 'backups')
-LAB = os.path.join(DATA, 'lab.yaml')
-CAT = os.path.join(DATA, 'catalog.yaml')
+DATA = BACKUPS = LAB = CAT = ''               # set by use_data()
+BACKUP_RE = re.compile(r'^(lab|catalog)-rev(\d{6,})-(\d{8}T\d{6})\.yaml$')
 DEFAULT_CAT = os.path.join(BASE, 'defaults', 'catalog.yaml')
 MAX_BACKUPS = 300
 MAX_BODY = 20 * 1024 * 1024
@@ -52,6 +54,14 @@ STATIC = {
 
 mutex = threading.Lock()
 lock = {'holder': None, 'by': '', 'exp': 0.0}
+
+
+def use_data(folder):
+    global DATA, BACKUPS, LAB, CAT
+    DATA = os.path.abspath(folder)
+    BACKUPS = os.path.join(DATA, 'backups')
+    LAB = os.path.join(DATA, 'lab.yaml')
+    CAT = os.path.join(DATA, 'catalog.yaml')
 
 
 def read(path):
@@ -88,6 +98,16 @@ def backup(path, rev):
     old = sorted(f for f in os.listdir(BACKUPS) if f.startswith(name + '-rev'))
     for f in old[:-MAX_BACKUPS]:
         os.remove(os.path.join(BACKUPS, f))
+
+
+def backups():
+    out = []
+    for f in os.listdir(BACKUPS) if os.path.isdir(BACKUPS) else []:
+        m = BACKUP_RE.match(f)
+        if m:
+            out.append({'file': f, 'layer': m.group(1), 'rev': int(m.group(2)), 'time': m.group(3)})
+    out.sort(key=lambda b: (b['time'], b['rev'], b['layer']), reverse=True)
+    return out
 
 
 def state():
@@ -135,6 +155,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/rev':
             with mutex:
                 return self.json(200, {'rev': rev_of(read(LAB))})
+        if path == '/api/backups':
+            with mutex:
+                return self.json(200, {'backups': backups()})
+        if path == '/api/backup':
+            name = (parse_qs(self.path.partition('?')[2]).get('file') or [''])[0]
+            if not BACKUP_RE.fullmatch(name):          # also keeps the request inside the backups folder
+                return self.json(400, {'error': 'invalid backup name'})
+            with mutex:
+                text = read(os.path.join(BACKUPS, name))
+            return self.json(200, {'file': name, 'text': text}) if text else self.json(404, {'error': 'backup not found'})
         if path in STATIC:
             name, ctype = STATIC[path]
             try:
@@ -189,7 +219,9 @@ def main():
     ap = argparse.ArgumentParser(description='Labmap server')
     ap.add_argument('--port', type=int, default=8080)
     ap.add_argument('--host', default='0.0.0.0')
+    ap.add_argument('--data', default=os.path.join(BASE, 'data-do-not-edit'), help='data folder (default: data-do-not-edit next to server.py)')
     a = ap.parse_args()
+    use_data(a.data)
     if not os.path.exists(os.path.join(BASE, 'index.html')):
         sys.exit('index.html must be next to server.py')
     os.makedirs(BACKUPS, exist_ok=True)
