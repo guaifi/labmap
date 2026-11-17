@@ -223,3 +223,7 @@ saved, useful only for a demo.
 IPv4 only. No authentication. The map does not minimise cable crossings; with hundreds
 of cables use the layer toggles, the project filter or select a device. Other browsers
 see a change after about 8 seconds.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
