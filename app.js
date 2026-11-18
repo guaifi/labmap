@@ -155,7 +155,10 @@
      the switches each VLAN spans and the parts it is split into. It also gives
      the VLAN warnings: trunk ends that differ, a device set to a VLAN its port
      does not give, sub-interfaces whose VLAN the port does not carry, a VLAN
-     whose members are on switches no trunk joins.
+     whose members are on switches no trunk joins, VLAN ids reused where they meet.
+     Selecting a device on the VLAN map shows what it reaches (reachOf): its VLANs,
+     the devices it sees and, dashed, what its gateway may route to. The cable
+     wizard proposes, for a network port, a switch port of the same VLAN first.
      Physical position in the room is not used.
    · Exports: Map SVG is the whole lab whatever the filters, with its CSS inlined
      (light theme); Report HTML is one static file (map + tables) to print as PDF;
@@ -425,8 +428,8 @@ function reindex() {
     if (l.type === 'power' && da !== db) { push(ix.pout, da, l); push(ix.pin, db, l); ix.plinks.push(l); }
   }
   IX = ix;
+  ix.l2 = l2Model();                                               // before the IPs: a port with no VLAN set takes the one it gets from its switch
   ix.ip = buildIpIndex();
-  ix.l2 = l2Model();
   ix.issues = validate();
   ix.issueDev = new Map();
   for (const i of ix.issues) if (i.dev && (ix.issueDev.get(i.dev) !== 'err')) ix.issueDev.set(i.dev, i.level);
@@ -466,7 +469,8 @@ function buildIpIndex() {
     const n = ipToInt(P.p.ip);
     if (n == null) continue;
     let vn = P.p.vlan && per[P.p.vlan] ? P.p.vlan : '';
-    if (!P.p.vlan) for (const k of Object.keys(per)) { const c = per[k].cidr; if (c && n >= c.base && n <= c.last) { vn = k; break; } }
+    if (!P.p.vlan) { const m = (IX.l2.byIface.get(ref) || []).find(x => x.mode === 'untagged' && per[x.vlan]); if (m) vn = m.vlan; }      // deduced from the switch port
+    if (!vn && !P.p.vlan) for (const k of Object.keys(per)) { const c = per[k].cidr; if (c && n >= c.base && n <= c.last) { vn = k; break; } }      // else by subnet
     push(per[vn].fixed, n, ref);
   }
   S.ipUse.forEach((e, i) => {
@@ -557,8 +561,8 @@ function validate() {
     if (!p.ip) continue;
     const n = ipToInt(p.ip);
     if (n == null) { add('warn', 'ip-bad', `${ref}: "${p.ip}" is not a valid IPv4`, { dev: P.dev }); continue; }
-    const v = S.vlans[p.vlan], c = v && parseCidr(v.subnet);
-    if (c && (n < c.base || n > c.last)) add('warn', 'ip-outside', `${ref}: ${p.ip} is outside ${v.subnet} (VLAN ${p.vlan})`, { dev: P.dev, vlan: p.vlan, ip: n });
+    const vn = p.vlan || ((IX.l2.byIface.get(ref) || []).find(x => x.mode === 'untagged') || {}).vlan, v = S.vlans[vn], c = v && parseCidr(v.subnet);      // set, or given by the switch port
+    if (c && (n < c.base || n > c.last)) add('warn', 'ip-outside', `${ref}: ${p.ip} is outside ${v.subnet} (VLAN ${vn}${p.vlan ? '' : ', from its switch port'})`, { dev: P.dev, vlan: vn, ip: n });
     if (!p.virtual && !linksOf(ref).length) add('warn', 'ip-no-cable', `${ref} has IP ${p.ip} and no cable`, { dev: P.dev });
   }
   for (const [m, refs] of macs) {
@@ -659,11 +663,63 @@ const routeText = r => r.hops.map(h => h.from + ' → ' + h.to).join(' · ');
      switch port sends tagged.
    · Any port with a VLAN and an IP (management, sub-interfaces, a router) makes
      its device a member of that VLAN.
+   · A VLAN may lie on several groups of switches no trunk joins (parts). A member
+     belongs to the part of its switch (m.part); devices see each other only within
+     a part (reachOf). Through the gateway of its VLAN (the member whose IP is the
+     VLAN gateway) a device may also reach the other VLANs of that gateway.
+   · A VLAN is a name with an id. Same name on unjoined switches: warned (likely a
+     missing cable; separate networks get their own names). Different names with
+     the same id: fine on unjoined switches (sameId, shown on the map), warned on
+     one switch or on the two ends of a trunk (there they are one network).
+   · Ports with no VLAN set take the deduced one for the IP grid and checks.
    --------------------------------------------------------------------------- */
 const isBridge = n => S.devices[n].types.some(t => t === 'switch' || t === 'ap');
 const subIfaces = (d, pn) => d.ports.filter(q => q.virtual && q.name.startsWith(pn + '.'));
+/* the first switch (or AP) a port reaches; a sub-interface (eth0.20) goes by its parent */
+function firstBridge(ref) {
+  const P = IX.ports.get(ref);
+  if (!P) return '';
+  const from = P.p.virtual && !isBridge(P.dev) && P.p.name.includes('.') ? P.dev + ':' + P.p.name.split('.')[0] : ref;
+  for (const r of routesFrom(from)) { const E = refDev(r.end); if (S.devices[E] && isBridge(E)) return E; }
+  return '';
+}
+/* One line: its VLANs, how many devices it sees, and what its gateway may route to. */
+function reachText(n) {
+  const r = reachOf(n);
+  if (!r.own.length) return 'In no VLAN.';
+  let t = [...r.byVlan].map(([v, ds]) => v + ' (' + ds.size + ')').join(', ') + ' · sees ' + plural(r.direct.size, 'device');
+  if (r.own.every(m => m.part < 0)) t += ' · not on a switch';
+  if (r.routed.length) t += ' · via ' + [...new Set(r.routed.map(x => x.via))].join(', ') + ': ' + r.routed.map(x => x.vlan).join(', ');
+  return t;
+}
+/* What a device reaches. direct: same VLAN and same part of it (joined by switches and
+   trunks). routed: through the gateway of one of its VLANs, the other VLANs that gateway
+   is in (if its rules allow it). */
+function reachOf(n) {
+  const out = { own: [], direct: new Set(), byVlan: new Map(), routed: [], routedDevs: new Set() };
+  for (const [vn, x] of Object.entries(IX.l2.vlans)) for (const m of x.members) if (m.dev === n) out.own.push(m);
+  for (const m of out.own) {
+    const x = IX.l2.vlans[m.vlan], peers = m.part < 0 ? [] : x.members.filter(o => o.dev !== n && o.part === m.part).map(o => o.dev);
+    if (!out.byVlan.has(m.vlan)) out.byVlan.set(m.vlan, new Set());
+    for (const d of peers) { out.direct.add(d); out.byVlan.get(m.vlan).add(d); }
+    for (const g of x.members) {
+      if (!g.gw || g.dev === n || g.part !== m.part || m.part < 0) continue;
+      for (const [v2, x2] of Object.entries(IX.l2.vlans)) {
+        if (v2 === m.vlan) continue;
+        const gm = x2.members.find(o => o.dev === g.dev);
+        if (!gm || out.routed.some(r => r.vlan === v2)) continue;
+        out.routed.push({ via: g.dev, vlan: v2 });
+        for (const o of x2.members) if (o.dev !== n && o.part === gm.part) out.routedDevs.add(o.dev);
+      }
+    }
+  }
+  out.routed = out.routed.filter(r => !out.byVlan.has(r.vlan));
+  for (const d of out.direct) out.routedDevs.delete(d);
+  return out;
+}
 function l2Model() {
-  const out = { vlans: {}, issues: [], none: [], carry: new Map(), managed: new Set(), byIface: new Map() };
+  const out = { vlans: {}, issues: [], none: [], carry: new Map(), managed: new Set(), byIface: new Map(), sameId: {} };
+  const idOf = v => (S.vlans[v] && S.vlans[v].id != null && S.vlans[v].id !== '' ? String(S.vlans[v].id) : '');
   const V = vn => out.vlans[vn] || (out.vlans[vn] = { members: [], bridges: new Set(), islands: [] });
   const warn = (code, msg, x) => out.issues.push(Object.assign({ level: 'warn', code, msg }, x || {}));
   const phys = n => S.devices[n].ports.filter(p => isNetKind(p.kind) && !p.virtual);
@@ -689,7 +745,7 @@ function l2Model() {
      set that leads into unmanaged switches, like a home router), outwards */
   const run = (sp, c, n, hostSrc) => {
     const brSeen = new Set([n]);
-    const walk = (ref, via, depth) => {
+    const walk = (ref, via, depth, br) => {
       for (const r of routesFrom(ref)) {
         const [E, q] = splitRef(r.end);
         if (!S.devices[E]) continue;
@@ -702,7 +758,12 @@ function l2Model() {
           edgeSeen.add(k);
           const A = IX.ports.get(sp).p, B = IX.ports.get(r.end).p, cb = carry(r.end), lk = { link: r.hops[0].link.id, dev: n };
           if (A.vlan && B.vlan && A.vlan !== B.vlan) warn('trunk-untagged', `Cable ${ids(r)}: untagged VLAN ${A.vlan} on ${sp}, ${B.vlan} on ${r.end}`, lk);
-          for (const v of c.t) if (!cb.t.includes(v)) warn('trunk-tagged', `Cable ${ids(r)}: VLAN ${v} tagged on ${sp}, not on ${r.end}`, lk);
+          for (const v of c.t) {
+            if (cb.t.includes(v)) continue;
+            const twin = idOf(v) && all(cb).find(w => w !== v && idOf(w) === idOf(v));      // same number, another name: on the wire they are one
+            if (twin) warn('vlan-id', `Cable ${ids(r)}: VLAN id ${idOf(v)} is ${v} on ${sp} and ${twin} on ${r.end}: on the cable they are one network`, lk);
+            else warn('trunk-tagged', `Cable ${ids(r)}: VLAN ${v} tagged on ${sp}, not on ${r.end}`, lk);
+          }
           for (const v of all(c)) if (all(cb).includes(v)) join(v, n, E);
           continue;
         }
@@ -711,15 +772,15 @@ function l2Model() {
           brSeen.add(E);
           for (const v of all(c)) { V(v).bridges.add(E); join(v, n, E); }
           for (const q2 of S.devices[E].ports) {
-            if (q2.virtual && q2.vlan == null && q2.ip && c.u) { member(c.u, { dev: E, iface: E + ':' + q2.name, ip: q2.ip, mode: 'untagged', how: 'switch', att: sp, via: vias }); seen.add(E + ':' + q2.name); }      // its management address
-            if (isNetKind(q2.kind) && !q2.virtual && q2.name !== q && linksOf(E + ':' + q2.name).length) walk(E + ':' + q2.name, vias.concat([E]), depth + 1);
+            if (q2.virtual && q2.vlan == null && q2.ip && c.u) { member(c.u, { dev: E, iface: E + ':' + q2.name, ip: q2.ip, mode: 'untagged', how: 'switch', att: sp, via: vias, br: br || E }); seen.add(E + ':' + q2.name); }      // its management address
+            if (isNetKind(q2.kind) && !q2.virtual && q2.name !== q && linksOf(E + ':' + q2.name).length) walk(E + ':' + q2.name, vias.concat([E]), depth + 1, br || E);
           }
           continue;
         }
         /* a host, maybe through an adapter: its interface is the last network port on the way */
         const ipRef = lastNet(r), IP = IX.ports.get(ipRef), own = IP && isNetKind(IP.p.kind) ? IP.p : null;
         seen.add(ipRef); seen.add(r.end);
-        const set = own && own.vlan, u = set || c.u, x = { dev: E, iface: ipRef, ip: own ? own.ip || '' : '', att: sp, via: vias.filter(v => v !== E) };
+        const set = own && own.vlan, u = set || c.u, x = { dev: E, iface: ipRef, ip: own ? own.ip || '' : '', att: sp, via: vias.filter(v => v !== E), br };
         if (set && c.u && set !== c.u && !c.t.includes(set)) warn('host-vlan', `${ipRef}: set to VLAN ${set}, but ${sp} gives ${c.u}`, { dev: E, link: r.hops[0].link.id });
         const host = IP ? S.devices[IP.dev] : null, subs = host ? subIfaces(host, IP.p.name) : [];
         if (u) member(u, Object.assign({ mode: 'untagged', how: set ? 'set' : 'switch' }, x)); else if (!subs.some(sb => sb.vlan) && !c.t.length) out.none.push({ ref: ipRef, att: sp });
@@ -729,16 +790,24 @@ function l2Model() {
           if (sb.vlan !== c.u && !c.t.includes(sb.vlan)) warn('host-tagged', `${IP.dev}:${sb.name}: VLAN ${sb.vlan} tagged, but ${sp} does not carry it`, { dev: E, link: r.hops[0].link.id });
           member(sb.vlan, Object.assign({}, x, { iface: IP.dev + ':' + sb.name, ip: sb.ip || '', mode: 'tagged', how: 'set' }));
         }
-        for (const v of c.t) if (!subs.some(sb => sb.vlan === v)) member(v, Object.assign({}, x, { mode: 'tagged', how: 'switch' }));
+        for (const v of (own && own.vlans) || []) {                   // tagged VLANs the device itself lists (a hypervisor)
+          if (v !== c.u && !c.t.includes(v)) warn('host-tagged', `${ipRef}: VLAN ${v} tagged, but ${sp} does not carry it`, { dev: E, link: r.hops[0].link.id });
+          member(v, Object.assign({}, x, { mode: 'tagged', how: 'set', ip: '' }));      // its address there is not known (the port IP is the untagged one)
+        }
+        for (const v of c.t) if (!subs.some(sb => sb.vlan === v)) member(v, Object.assign({}, x, { mode: 'tagged', how: 'switch', ip: '' }));
       }
     };
-    walk(sp, [], 0);
+    walk(sp, [], 0, isBridge(n) ? n : '');
   };
-  for (const n of out.managed) for (const p of phys(n)) {
-    const sp = n + ':' + p.name, c = carry(sp);
-    out.carry.set(sp, c);
-    for (const v of all(c)) { V(v).bridges.add(n); join(v, n, n); }
-    if (linksOf(sp).length) run(sp, c, n, false);
+  for (const n of out.managed) {
+    const ids0 = new Map();
+    for (const p of phys(n)) {
+      const sp = n + ':' + p.name, c = carry(sp);
+      out.carry.set(sp, c);
+      for (const v of all(c)) { V(v).bridges.add(n); join(v, n, n); if (idOf(v)) { if (!ids0.has(idOf(v))) ids0.set(idOf(v), new Set()); ids0.get(idOf(v)).add(v); } }
+      if (linksOf(sp).length) run(sp, c, n, false);
+    }
+    for (const [id, vs] of ids0) if (vs.size > 1) warn('vlan-id', `${n} has VLANs ${[...vs].sort(natCmp).join(' and ')} with the same id ${id}: for the switch they are one network`, { dev: n });
   }
   for (const n of IX.names) if (!isBridge(n)) for (const p of phys(n)) if (p.vlan && linksOf(n + ':' + p.name).length) run(n + ':' + p.name, { u: p.vlan, t: p.vlans || [] }, n, true);
   /* what is set on the ports and was not reached from a switch */
@@ -746,8 +815,9 @@ function l2Model() {
     const ref = n + ':' + p.name;
     if (!isNetKind(p.kind) || seen.has(ref)) continue;
     if (out.managed.has(n) && !p.virtual && !p.ip) continue;          // a switch port is not a member, unless it has an address
-    if (p.vlan) member(p.vlan, { dev: n, iface: ref, ip: p.ip || '', mode: p.virtual && !isBridge(n) ? 'tagged' : 'untagged', how: isBridge(n) && p.virtual ? 'l3' : 'set', att: '', via: [] });
-    if (!out.managed.has(n)) for (const v of p.vlans || []) member(v, { dev: n, iface: ref, ip: '', mode: 'tagged', how: 'set', att: '', via: [] });
+    const br = isBridge(n) ? n : firstBridge(ref);
+    if (p.vlan) member(p.vlan, { dev: n, iface: ref, ip: p.ip || '', mode: p.virtual && !isBridge(n) ? 'tagged' : 'untagged', how: isBridge(n) && p.virtual ? 'l3' : 'set', att: '', via: [], br });
+    if (!out.managed.has(n)) for (const v of p.vlans || []) member(v, { dev: n, iface: ref, ip: '', mode: 'tagged', how: 'set', att: '', via: [], br });
     if (!p.vlan && !p.virtual && !isBridge(n) && !(p.vlans || []).length && linksOf(ref).length) out.none.push({ ref, att: '' });
   }
   /* parts of each VLAN, gateways, and a warning when members end up in separate parts */
@@ -756,12 +826,14 @@ function l2Model() {
     for (const b of x.bridges) push(parts, find(vn + '|' + b), b);
     x.islands = [...parts.values()].map(a => a.sort(natCmp));
     const gw = S.vlans[vn] && S.vlans[vn].gateway;
-    for (const m of x.members) m.gw = !!gw && m.ip === gw;
-    if (x.islands.length > 1) {
-      const used = x.islands.filter(isl => x.members.some(m => m.att && isl.includes(refDev(m.att))));
-      if (used.length > 1) warn('vlan-split', `VLAN ${vn} is split: ${used.map(i => i.join(', ')).join(' | ')} (no trunk carries it between them)`, { vlan: vn });
-    }
+    for (const m of x.members) { m.gw = !!gw && m.ip === gw; m.part = m.br ? x.islands.findIndex(i => i.includes(m.br)) : -1; }
+    /* the same VLAN (same name, so same id) on switches no trunk joins: most likely a
+       missing cable or trunk. Separate networks on purpose get different names (they may
+       keep the same id: see sameId) */
+    const used = x.islands.filter((isl, i) => x.members.some(m => m.part === i));
+    if (used.length > 1) warn('vlan-split', `VLAN ${vn} is split: ${used.map(i => i.join(', ')).join(' | ')}. No trunk joins them, so their devices do not see each other. Missing cable? If they are separate networks, give each its own VLAN name.`, { vlan: vn });
   }
+  for (const v of Object.keys(S.vlans)) { const o = Object.keys(S.vlans).filter(w => w !== v && idOf(w) && idOf(w) === idOf(v)); if (o.length) out.sameId[v] = o.sort(natCmp); }
   return out;
 }
 
@@ -1654,8 +1726,8 @@ function renderSelbar(L) {
     return;
   }
   if (UI.sel && L.box.has(UI.sel)) {
-    const n = UI.sel, d = S.devices[n], ls = L.links.filter(k => k.devs.includes(n)), vs = L.byDev ? [...(L.byDev.get(n) || new Map()).keys()] : null;
-    h = `<b class="mono">${esc(n)}</b><span class="mut">${esc(d.types.map(typeLabel).join(', '))} · ${vs ? esc('VLANs: ' + (vs.join(', ') || '—')) : plural(ls.length, 'cable')}</span>`;
+    const n = UI.sel, d = S.devices[n], ls = L.links.filter(k => k.devs.includes(n));
+    h = `<b class="mono">${esc(n)}</b><span class="mut">${L.byDev ? esc(reachText(n)) : esc(d.types.map(typeLabel).join(', ')) + ' · ' + plural(ls.length, 'cable')}</span>`;
   } else if (UI.selLink) {
     const l = S.links.find(x => x.id === UI.selLink);
     if (l) h = `<b class="mono">${esc(l.id)}</b><span class="mut mono">${esc(l.a)} ↔ ${esc(l.b)}</span>`;
@@ -1692,9 +1764,18 @@ function vlanLayout(avail) {
   for (const m of multi) { let r = rows.findIndex(row => row.every(o => o.cs[o.cs.length - 1] < m.cs[0] || m.cs[m.cs.length - 1] < o.cs[0])); if (r < 0) { rows.push([]); r = rows.length - 1; } rows[r].push(m); m.y = top + r * (M.ROW + M.GAPY); }
   const y0 = top + rows.length * (M.ROW + M.GAPY) + (rows.length ? 10 : 0);
   let H = y0 + 20;
-  for (const [i, list] of single) {
-    list.sort((a, b) => natCmp(a.n, b.n));
-    list.forEach((o, k) => { o.y = y0 + k * (M.BOX + M.GAPY); H = Math.max(H, o.y + M.BOX + 20); });
+  for (const [i, list] of single) {                                  // grouped by part of the VLAN: a split VLAN shows its parts apart
+    const c = cols[i], size = new Map();
+    for (const m of c.x.members) size.set(m.part, (size.get(m.part) || 0) + 1);
+    const rank = [...size.keys()].filter(k => k >= 0).sort((a, b) => size.get(b) - size.get(a) || a - b);      // biggest part first
+    const pt = o => (o.ms[0].part >= 0 ? rank.indexOf(o.ms[0].part) : 1e6);
+    list.sort((a, b) => pt(a) - pt(b) || natCmp(a.n, b.n));
+    c.seps = [];
+    let y = y0, last = null;
+    for (const o of list) {
+      if (last != null && pt(o) !== last) { c.seps.push({ y: y + 2, label: pt(o) === 1e6 ? 'not on a switch' : 'not joined: ' + c.x.islands[o.ms[0].part].join(', ') }); y += 26; }
+      last = pt(o); o.y = y; y += M.BOX + M.GAPY; H = Math.max(H, o.y + M.BOX + 20);
+    }
   }
   const box = new Map();
   for (const m of multi) box.set(m.n, { n: m.n, x: colX(m.cs[0]) + 18, y: m.y, h: M.ROW });
@@ -1705,7 +1786,8 @@ function vlanSvg(o) {
   const L = vlanLayout(o.avail), M = Object.assign({}, VM, { CW: L.cw }), hits = o.hits || null, out = [], k = (L.cw - VM.CW) / 5.4;
   const tr = (s, n) => trunc(s, Math.round(n + k));
   const t = (x, y, cls, txt, extra) => `<text class="${cls}" x="${x}" y="${y}"${extra || ''}>${esc(txt)}</text>`;
-  const dc = n => ['vdev', UI.sel === n ? 'sel' : '', hits ? (hits.has(n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
+  const R = UI.sel && S.devices[UI.sel] ? reachOf(UI.sel) : null;      // what the selected device reaches
+  const dc = n => ['vdev', UI.sel === n ? 'sel' : '', R && R.direct.has(n) ? 'reach' : '', R && R.routedDevs.has(n) ? 'routed' : '', hits ? (hits.has(n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
   const lab = m => { const [d, pn] = splitRef(m.iface); return (d !== m.dev ? d : pn) + (m.ip ? ' · ' + m.ip : ''); };      // through an adapter: its name
   const badges = m => (m.gw ? ' GW' : '') + (m.mode === 'tagged' ? ' T' : '');
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" class="map vmap${UI.sel ? ' has-sel' : ''}" viewBox="0 0 ${L.W} ${L.H}" ${o.scale ? `width="${Math.round(L.W * o.scale)}" height="${Math.round(L.H * o.scale)}"` : 'width="100%"'} data-act="map-bg" role="img" aria-label="VLAN map">`);
@@ -1714,15 +1796,18 @@ function vlanSvg(o) {
   for (const c of L.cols) {
     const x = L.colX(c.i), v = S.vlans[c.vn] || {}, isl = c.x.islands.filter(i => i.length);
     out.push(`<line class="vbus" x1="${L.busX(c.i)}" x2="${L.busX(c.i)}" y1="${M.PAD + M.HEAD - 8}" y2="${L.H - 10}" style="stroke:${c.color}"/>`);
-    out.push(`<g class="vhead" ${c.none ? '' : `data-act="vlan-go" data-v="${esc(c.vn)}"`}><rect class="vh" x="${x}" y="${M.PAD}" width="${M.CW}" height="${M.HEAD - 8}" rx="6"/><rect x="${x}" y="${M.PAD}" width="${M.CW}" height="4" rx="2" style="fill:${c.color}"/>`);
+    const hc = !R ? '' : R.byVlan.has(c.vn) ? ' von' : R.routed.some(r => r.vlan === c.vn) ? ' vrt' : ' voff';
+    out.push(`<g class="vhead${hc}" ${c.none ? '' : `data-act="vlan-go" data-v="${esc(c.vn)}"`}><rect class="vh" x="${x}" y="${M.PAD}" width="${M.CW}" height="${M.HEAD - 8}" rx="6"/><rect x="${x}" y="${M.PAD}" width="${M.CW}" height="4" rx="2" style="fill:${c.color}"/>`);
     if (c.none) out.push(t(x + 8, M.PAD + 20, 'vt', 'No VLAN') + t(x + 8, M.PAD + 34, 'vs', 'Cabled, VLAN unknown.') + t(x + 8, M.PAD + 47, 'vs', 'Set it on the switch port.'));
     else {
       out.push(t(x + 8, M.PAD + 20, 'vt', tr(c.vn + (v.id != null && v.id !== '' ? ' · ' + v.id : ''), 26)) + t(x + 8, M.PAD + 33, 'vs', tr((v.subnet || 'no subnet') + (v.gateway ? ' · gw ' + v.gateway : ''), 34)));
       out.push(isl.length > 1 ? t(x + 8, M.PAD + 46, 'vs vwarn', tr('split: ' + isl.map(i => i.join(', ')).join(' | '), 36)) : t(x + 8, M.PAD + 46, 'vs', tr(isl.length ? 'on ' + isl[0].join(', ') : 'on no switch', 36)));
-      out.push(t(x + 8, M.PAD + 58, 'vs', plural(c.x.members.length, 'member')));
+      const twin = IX.l2.sameId[c.vn];
+      out.push(t(x + 8, M.PAD + 58, 'vs', tr(plural(c.x.members.length, 'member') + (twin ? ' · id also ' + twin.join(', ') : ''), 36)));
     }
     out.push('</g>');
   }
+  for (const c of L.cols) for (const sp of c.seps || []) out.push(`<rect class="bg" x="${L.busX(c.i) - 5}" y="${sp.y - 4}" width="10" height="20"/>` + t(L.busX(c.i) + 10, sp.y + 10, 'vs vwarn', tr(sp.label, 34)));
   for (const m of L.multi) {                                         // across columns
     const a = m.cs[0], z = m.cs[m.cs.length - 1], x0 = L.colX(a) + 18, x1 = L.colX(z) + M.CW;
     out.push(`<g class="${dc(m.n)}" data-act="dev" data-dev="${esc(m.n)}" data-map="1"><rect class="vb" x="${x0}" y="${m.y}" width="${x1 - x0}" height="${M.ROW}" rx="5"/>`);
@@ -2078,6 +2163,7 @@ function devSheet(name) {
       const kv = [['Model', d.model], ['Serial', d.serial], ['Owner', d.owner], ['Location', d.location], ['Notes', d.notes]].filter(x => x[1]);
       if (kv.length) h += '<dl class="kv">' + kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('') + '</dl>';
       if (adminUrl(name)) h += `<p>${webBtn(name, 'Admin page')} <span class="mono mut">${esc(adminUrl(name))}</span></p>`;
+      if (reachOf(name).own.length) h += `<p><span class="lbl">Networks</span> ${esc(reachText(name))} <button class="linkb" data-act="see-vlans" data-dev="${esc(name)}">VLAN map</button></p>`;
       h += IX.issues.filter(i => i.dev === name).map(issueHtml).join('');
       /* power */
       const ins = upLinks(name);
@@ -2360,13 +2446,36 @@ function wizLink(o) {
     if (sc.k === 'free') { const p = portAt(end === 'a' ? 'b' : 'a'); if (p) { const lay = layerOf(p.kind); if (lay !== 'other') f.layer = lay; if (lay === 'power') { const d = powerDir(p.kind); if (d) f.dir = d === 'in' ? 'out' : 'in'; } } }
     return f;
   };
-  /* proposes the first free, compatible device and port for whatever is missing */
+  /* network: the VLAN the other end is in, and how well a switch port fits it (0 gives
+     that VLAN, 1 not set yet on a switch that has it, 1.5 not set yet, 2 has it tagged,
+     3 gives another) */
+  const wantVlan = end => {
+    const o = w[end === 'a' ? 'b' : 'a'], ref = o.dev + ':' + o.port, P = IX.ports.get(ref);
+    if (!P || !isNetKind(P.p.kind)) return '';
+    return P.p.vlan || ((IX.l2.byIface.get(ref) || []).find(m => m.mode === 'untagged') || {}).vlan || '';
+  };
+  const fit = (dn, p, want) => {
+    if (!want || !isNetKind(p.kind)) return 0;
+    const c = IX.l2.carry.get(dn + ':' + p.name);
+    const has = IX.l2.vlans[want] && IX.l2.vlans[want].bridges.has(dn);      // the switch already carries that VLAN somewhere
+    if (c) return c.u === want ? 0 : !c.u ? (has ? 1 : 1.5) : c.t.includes(want) ? 2 : 3;
+    if (!isBridge(dn)) return 0;
+    const vs = Object.keys(IX.l2.vlans).filter(v => IX.l2.vlans[v].bridges.has(dn));      // an unmanaged switch: the VLAN it hangs from
+    return vs.includes(want) ? 0 : vs.length ? 3 : 1;
+  };
+  const best = (devs, f, want) => {
+    let b = null;
+    for (const n of devs) for (const p of S.devices[n].ports) { if (!portOk(n, p, f, w.edit)) continue; const sc = fit(n, p, want); if (!b || sc < b.sc) b = { n, p: p.name, sc }; if (!sc) return b; }
+    return b;
+  };
+  /* proposes a free, compatible device and port for whatever is missing (for a network
+     cable, a switch port of the same VLAN first) */
   const fix = () => {
     for (const end of ['a', 'b']) {
-      const e = w[end], other = w[end === 'a' ? 'b' : 'a'], f = filt(end);
+      const e = w[end], other = w[end === 'a' ? 'b' : 'a'], f = filt(end), want = wantVlan(end);
       if (e.dev && !S.devices[e.dev]) { e.dev = ''; e.port = ''; }
-      if (!e.dev && w.sc !== 'free' && other.dev && other.port) e.dev = IX.names.find(n => n !== other.dev && devOk(n, f, w.edit)) || '';
-      if (e.dev && !e.port && w.hold !== end) { const p = S.devices[e.dev].ports.find(p => portOk(e.dev, p, f, w.edit)) || (w.strict ? null : S.devices[e.dev].ports[0]); if (p) e.port = p.name; }
+      if (!e.dev && w.sc !== 'free' && other.dev && other.port) { const b = best(IX.names.filter(n => n !== other.dev && devOk(n, f, w.edit)), f, want); if (b) { e.dev = b.n; if (w.hold !== end) e.port = b.p; } }
+      if (e.dev && !e.port && w.hold !== end) { const b = best([e.dev], f, want), p = b ? b.p : w.strict ? '' : (S.devices[e.dev].ports[0] || {}).name; if (p) e.port = p; }
     }
   };
   /* lists show every free port of the shortcut, not only those matching the other end:
@@ -2731,6 +2840,7 @@ const ACT = {
   zoom: el => { UI.fit = false; UI.zoom = Math.max(0.3, Math.min(3, UI.zoom * (+el.dataset.z > 0 ? 1.25 : 0.8))); renderMapTab(); },
   fit: () => { UI.fit = !UI.fit; if (!UI.fit) UI.zoom = 1; renderMapTab(); },
   view: el => { UI.view = el.dataset.v === 'vlan' ? 'vlan' : 'phys'; UI.pend = null; try { localStorage.setItem('labmap.view', UI.view); } catch (e) {} renderMapTab(); },
+  'see-vlans': el => { const n = el.dataset.dev; closeDlg(true); UI.view = 'vlan'; UI.sel = n; UI.selLink = null; UI.center = n; setTab('map'); },
   'vlan-go': el => { if (!S.vlans[el.dataset.v]) return; UI.vlan = el.dataset.v; setTab('ips'); },
   'map-bg': () => { if (UI.sel || UI.selLink || UI.pend) { UI.sel = UI.selLink = UI.pend = null; renderMap(); } },
   port: el => {                                                   // edit mode: first port, then the other end
@@ -2859,7 +2969,7 @@ async function boot() {
 /* Pure functions in view: for tests, for the console and for tools/ (Node). */
 const API = {
   VERSION, get site() { return SITE; }, get state() { return S; }, get index() { return IX; }, get net() { return NET; }, get ui() { return UI; },
-  layerOf, powerDir, isNetKind, kindKey, mapCol, mapCrossings, exportVlanSvg, vlanLayout, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
+  layerOf, powerDir, isNetKind, kindKey, mapCol, mapCrossings, exportVlanSvg, vlanLayout, reachOf, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
   FORMAT, toYaml, toCatalogYaml, parseYaml, readData, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
   /* load a lab without edit mode or saving (tests and console) */
   load: st => { st.catalog = st.catalog || clone(S.catalog); S = normalize(st); UNDO = null; refreshAll(); }

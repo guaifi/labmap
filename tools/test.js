@@ -92,14 +92,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(boot.links === boot.l && boot.l > 150, boot.links + ' lines for ' + boot.l + ' cables');
   ok(!boot.err && !boot.scrollX, 'no error banner and no horizontal overflow at 390 px');
   console.log('  example issues:'); boot.issues.forEach(i => console.log('     ' + i));
-  ok(boot.issues.length === 2, 'only the two intentional issues');
+  ok(boot.issues.length === 3 && boot.issues.some(i => /VLAN TEST-B is split/.test(i)), 'only the three intentional issues');
   const cols = [0, 1, 2, 3, 4].map(c => Object.keys(boot.col).filter(n => boot.col[n] === c));
   console.log('     columns: ' + cols.map(c => c.length).join(' / '));
   ok(['wall-1', 'ups-1', 'strip-1', 'pdu-1'].every(n => boot.col[n] === 0) && ['sw-lab-1', 'server-lab'].every(n => boot.col[n] === 4) && boot.col['psu-01'] === 1 && boot.col['board-01'] === 2 && boot.col['unit-01'] === 2 && boot.col['usbserial-01'] === 3, 'map columns: power, supplies, devices, adapters, network');
   const maxX = c => Math.max(...cols[c].map(n => boot.x[n])), minX = c => Math.min(...cols[c].map(n => boot.x[n]));
   ok([0, 1, 2, 3].every(c => maxX(c) < minX(c + 1)), 'each column is drawn left of the next one');
   const mq = await page.evaluate(() => { const cr = LAB.mapCrossings(); LAB.ui.sel = 'sw-lab-1'; LAB.refreshAll(); const rs = [...document.querySelectorAll('svg.map .ltag rect')].map(e => e.getBBox()); let n = 0; for (let i = 0; i < rs.length; i++) for (let j = i + 1; j < rs.length; j++) { const a = rs[i], c = rs[j]; if (a.x < c.x + c.width && c.x < a.x + a.width && a.y < c.y + c.height && c.y < a.y + a.height) n++; } LAB.ui.sel = null; LAB.refreshAll(); return { cr, tags: rs.length, over: n }; });
-  ok(mq.cr <= 45 && mq.tags >= 20 && mq.over === 0, 'map: devices reordered to cross fewer cables (' + mq.cr + ' crossings); the ' + mq.tags + ' cable tags of a switch do not overlap');
+  ok(mq.cr <= 85 && mq.tags >= 20 && mq.over === 0, 'map: devices reordered to cross fewer cables (' + mq.cr + ' crossings); the ' + mq.tags + ' cable tags of a switch do not overlap');
 
   console.log('2. Routes and power');
   const routes = await page.evaluate(() => {
@@ -339,19 +339,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.waitForFunction(() => LAB.net.editing);
   const trunk = await page.evaluate(() => {
     LAB.commit('test: trunk', s => {
-      const p = s.devices['sw-lab-1'].ports.find(q => q.name === 'p23'); p.vlan = 'LAB'; p.vlans = ['TEST-A', 'TEST-B'];
+      const p = s.devices['sw-lab-1'].ports.find(q => /^p\d+$/.test(q.name) && !s.links.some(l => l.a === 'sw-lab-1:' + q.name || l.b === 'sw-lab-1:' + q.name)); window.TRUNK = p.name; p.vlan = 'LAB'; p.vlans = ['TEST-A', 'TEST-B'];
       s.devices['pp-a'] = { types: ['other'], ports: LAB.parsePorts('p[1-6] rj45').map(x => ({ name: x.name, kind: x.kind })) };
       s.devices['pp-b'] = { types: ['other'], ports: LAB.parsePorts('p[1-6] rj45').map(x => ({ name: x.name, kind: x.kind })) };
       s.devices['pp-a'].ports[0].vlan = 'LAB'; s.devices['pp-b'].ports[0].vlan = 'TEST-A'; s.devices['pp-b'].ports[1].vlan = 'LAB';
       s.links.push({ id: 'N-950', type: 'net', a: 'pp-a:p1', b: 'pp-b:p1', notes: '' });
     });
-    const ref = 'sw-lab-1:p23', y = LAB.toYaml(LAB.state);
-    const back = LAB.normalize(LAB.parseYaml(y)).devices['sw-lab-1'].ports.find(q => q.name === 'p23').vlans;
+    const ref = 'sw-lab-1:' + window.TRUNK, y = LAB.toYaml(LAB.state);
+    const back = LAB.normalize(LAB.parseYaml(y)).devices['sw-lab-1'].ports.find(q => q.name === window.TRUNK).vlans;
     const mis = LAB.index.issues.filter(i => i.code === 'vlan-mismatch').map(i => i.msg);
     LAB.setTab('ips'); LAB.ui.vlan = 'TEST-A'; LAB.setTab('ips');
     const txt = document.getElementById('ips').textContent;
     const items = [...document.querySelectorAll('#ips .item')].map(i => i.textContent);
-    return { ref, yaml: /vlans: \[TEST-A, TEST-B\]/.test(y), back: (back || []).join(), mis, members: /Members of TEST-A \(\d+\)/.test(txt), tagged: items.some(t => /server-lab:eth1\.901/.test(t) && /tagged/.test(t)), from: items.some(t => /board-01:eth0/.test(t) && /from sw-lab-1:p18/.test(t)), on: /On sw-lab-1, sw-lab-2/.test(txt) };
+    return { ref, yaml: /vlans: \[TEST-A, TEST-B\]/.test(y), back: (back || []).join(), mis, members: /Members of TEST-A \(\d+\)/.test(txt), tagged: items.some(t => /server-lab:eth1\.901/.test(t) && /tagged/.test(t)), from: items.some(t => /board-01:eth0/.test(t) && /from sw-lab-1:p18/.test(t)), on: /On ap-lab-1, sw-lab-1, sw-lab-2/.test(txt) };
   });
   ok(trunk.yaml && trunk.back === 'TEST-A,TEST-B', 'a trunk port keeps its tagged VLANs in lab.yaml');
   ok(trunk.members && trunk.tagged && trunk.from && trunk.on, 'the IPs tab lists the members of a VLAN (tagged sub-interfaces, VLAN given by the switch port) and its switches', JSON.stringify(trunk));
@@ -474,14 +474,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   /* VLANs deduced from switch ports, trunks and sub-interfaces */
   const l2 = await page.evaluate(() => {
     const M = () => LAB.index.l2, mem = (v, iface) => M().vlans[v].members.find(m => m.iface === iface), codes = () => LAB.index.issues.map(i => i.code + ':' + i.msg);
-    const r = { base: codes().filter(c => /^(trunk|host|vlan-split)/.test(c)) };
+    const r = { base: codes().filter(c => /^(trunk|host|vlan-id)/.test(c)) };
     LAB.commit('test: board-01 without VLAN', s => { delete s.devices['board-01'].ports.find(p => p.name === 'eth0').vlan; });
     const m1 = mem('TEST-A', 'board-01:eth0'); r.inferred = m1 && m1.how === 'switch' && m1.att === 'sw-lab-1:p18';
     LAB.commit('test: board-01 in LAB', s => { s.devices['board-01'].ports.find(p => p.name === 'eth0').vlan = 'LAB'; });
     r.hostVlan = codes().filter(c => /^host-vlan/.test(c));
     LAB.commit('test: trunk without TEST-C', s => { const p = s.devices['sw-lab-2'].ports.find(q => q.name === 'sfp1'); p.vlans = p.vlans.filter(v => v !== 'TEST-C'); });
     r.trunk = codes().filter(c => /^trunk-tagged/.test(c));
-    r.split = codes().filter(c => /^vlan-split/.test(c));
+    r.split = codes().filter(c => /^vlan-split:VLAN TEST-C/.test(c));
     r.tagged = codes().filter(c => /^host-tagged/.test(c));
     LAB.commit('test: no trunk to the server', s => { delete s.devices['sw-lab-1'].ports.find(q => q.name === 'p5').vlans; });
     r.tagged2 = codes().filter(c => /^host-tagged/.test(c)).length;
@@ -502,6 +502,55 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.evaluate(() => [...document.querySelectorAll('svg.vmap .vhead')].find(g => g.dataset.v === 'TEST-B').dispatchEvent(new MouseEvent('click', { bubbles: true })));
   ok(await page.evaluate(() => LAB.ui.tab === 'ips' && LAB.ui.vlan === 'TEST-B'), 'tapping a VLAN title opens its IPs');
   await page.evaluate(() => { LAB.ui.view = 'phys'; LAB.setTab('map'); });
+  ok(errors.length === 0, 'no console errors', errors.join(' | '));
+
+
+  console.log('7e. Network cases: who reaches whom, split VLANs, reused VLAN ids');
+  const nc = await page.evaluate(() => {
+    const M = LAB.index.l2, mem = (v, d) => M.vlans[v].members.filter(m => m.dev === d), codes = LAB.index.issues.map(i => i.code + ':' + i.msg);
+    const u = LAB.reachOf('unit-01'), g = LAB.reachOf('golf-03'), h = LAB.reachOf('hotel-01');
+    return {
+      unitSees: ['unit-02', 'unit-03', 'board-07', 'server-lab', 'hv-01'].every(d => u.direct.has(d)) && !u.direct.has('golf-03'),
+      unitRouted: u.routed.map(r => r.via + '>' + r.vlan).sort().join(), unitRoutedDev: u.routedDevs.has('board-01'),
+      golfSees: g.direct.size, golfSplit: codes.filter(c => /^vlan-split:VLAN TEST-B is split: sw-golf-1 \| sw-lab-1, sw-lab-2\. .*Missing cable\?/.test(c)).length,
+      hotel: [...h.direct].sort().join(), sameId: (M.sameId['GOLF-NET'] || []).join(), idWarn: codes.filter(c => /^vlan-id/.test(c)).length, dupIp: codes.filter(c => /10\.95\.0\./.test(c)).length,
+      desk: mem('LAB', 'printer-1').map(m => m.how + ' ' + m.att + ' ' + m.via.join()).join(), tablet: mem('TEST-A', 'tablet-01').map(m => m.how + ' ' + m.att).join(),
+      hv: ['TEST-B', 'TEST-C'].map(v => mem(v, 'hv-01').map(m => m.mode + '/' + m.how + '/' + (m.ip || '-')).join()).join(' '),
+      apOk: !codes.some(c => /ap-lab-1/.test(c))
+    };
+  });
+  ok(nc.unitSees && nc.unitRouted === 'server-lab>LAB,server-lab>TEST-A,server-lab>TEST-C' && nc.unitRoutedDev, 'unit-01 sees the TEST-B devices on the joined switches, and through its gateway (server-lab) may reach LAB, TEST-A and TEST-C', nc.unitRouted);
+  ok(nc.golfSees === 0 && nc.golfSplit === 1, 'the same VLAN (name and id) on a switch no trunk joins: its device sees nobody, and it is warned as a likely missing cable');
+  ok(nc.hotel === 'hotel-02,sw-hotel-1' && nc.sameId === 'HOTEL-NET' && !nc.idWarn && !nc.dupIp, 'two separate networks reusing id 950 under different names: no warning, no false duplicate IPs, each sees only its own', nc.hotel);
+  ok(nc.desk === 'switch sw-lab-2:p17 desk-sw-1' && nc.tablet === 'switch ap-lab-1:wifi2', 'devices behind an unmanaged desk switch, and a tablet on the second SSID of the AP, get their VLAN with nothing set on them', nc.desk + ' | ' + nc.tablet);
+  ok(nc.hv === 'tagged/set/- tagged/set/-' && nc.apOk, 'a hypervisor lists its tagged VLANs (no address shown there); the AP trunk is consistent', nc.hv);
+  const clash = await page.evaluate(() => {
+    LAB.commit('test: id clash', s => { s.vlans['TEST-X'] = { id: 902, subnet: '192.168.61.0/24' }; s.devices['sw-lab-2'].ports.find(p => p.name === 'p18').vlan = 'TEST-X'; });
+    const a = LAB.index.issues.filter(i => i.code === 'vlan-id').map(i => i.msg);
+    LAB.commit('test: id clash on a trunk', s => { s.devices['sw-lab-2'].ports.find(p => p.name === 'p18').vlan = 'LAB'; const t = s.devices['sw-lab-2'].ports.find(p => p.name === 'sfp1'); t.vlans = t.vlans.map(v => (v === 'TEST-B' ? 'TEST-X' : v)); });
+    const b = LAB.index.issues.filter(i => i.code === 'vlan-id').map(i => i.msg);
+    LAB.commit('test: back', s => { const t = s.devices['sw-lab-2'].ports.find(p => p.name === 'sfp1'); t.vlans = t.vlans.map(v => (v === 'TEST-X' ? 'TEST-B' : v)); delete s.vlans['TEST-X']; });
+    return { a, b };
+  });
+  ok(clash.a.length === 1 && /sw-lab-2 has VLANs TEST-B and TEST-X with the same id 902/.test(clash.a[0]), 'two VLAN names with the same id on one switch are warned: for the switch they are one', clash.a[0]);
+  ok(clash.b.some(m => /VLAN id 902 is TEST-B on sw-lab-1:sfp1 and TEST-X on sw-lab-2:sfp1/.test(m)), 'and so are different names with the same id on the two ends of a trunk', clash.b.join(' | '));
+  await page.evaluate(() => { LAB.ui.view = 'vlan'; LAB.ui.sel = 'unit-01'; LAB.setTab('map'); });
+  const vsel = await page.evaluate(() => {
+    const cls = n => { const g = [...document.querySelectorAll('svg.vmap .vdev')].find(x => x.dataset.dev === n); return g ? g.getAttribute('class') : ''; };
+    return { bar: document.getElementById('selbar').textContent, on: [...document.querySelectorAll('svg.vmap .vhead.von')].map(g => g.dataset.v).join(), rt: [...document.querySelectorAll('svg.vmap .vhead.vrt')].map(g => g.dataset.v).sort().join(),
+      unit02: cls('unit-02'), golf: cls('golf-03'), b1: cls('board-01'), sep: [...document.querySelectorAll('svg.vmap text.vwarn')].some(t => t.textContent === 'not joined: sw-golf-1'), twin: /id also HOTEL-NET/.test(document.querySelector('svg.vmap').textContent) };
+  });
+  ok(/^unit-01/.test(vsel.bar) && /TEST-B \(5\)/.test(vsel.bar) && /via server-lab: LAB, TEST-A, TEST-C/.test(vsel.bar) && vsel.on === 'TEST-B' && vsel.rt === 'LAB,TEST-A,TEST-C', 'VLAN map, unit-01 selected: its VLAN, what it sees and what its gateway may route to', vsel.bar);
+  ok(/reach/.test(vsel.unit02) && !/reach|routed/.test(vsel.golf) && /routed/.test(vsel.b1) && vsel.sep && vsel.twin, 'devices it sees stand out, routed ones dashed, the isolated part apart and marked "not joined"; a reused id is shown');
+  await page.evaluate(() => { LAB.ui.sel = null; LAB.ui.view = 'phys'; LAB.setTab('devices'); });
+  await page.fill('#dq', 'hv-01');
+  await page.waitForFunction(() => document.querySelectorAll('#dev-list .item').length === 1 && document.querySelector('#dev-list .item').dataset.dev === 'hv-01');
+  await page.click('#dev-list .item');
+  const net = await page.evaluate(() => document.getElementById('dlg-b').textContent);
+  await page.click('#dlg-b [data-act="see-vlans"]');
+  ok(/Networks LAB \(\d+\), TEST-B \(\d+\), TEST-C \(\d+\)/.test(net) && await page.evaluate(() => LAB.ui.tab === 'map' && LAB.ui.view === 'vlan' && LAB.ui.sel === 'hv-01'), 'the device sheet says its networks, and "VLAN map" shows it selected there');
+  await page.evaluate(() => { LAB.ui.sel = null; LAB.ui.view = 'phys'; LAB.setTab('map'); });
+  await page.fill('#dq', '').catch(() => {});
   ok(errors.length === 0, 'no console errors', errors.join(' | '));
 
   console.log('8. Desktop, dark theme; home network, example button and load at scale 4');

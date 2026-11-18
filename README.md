@@ -18,8 +18,11 @@ uses. One web page, one small Python server, two YAML files. No dependencies.
 - **VLAN map**: the logical view next to the physical one. One column per VLAN with
   its members, the switches it spans and where it is split; built from the cables and
   the switch ports (a device gets the VLAN of the port it is plugged into, also through
-  USB-Ethernet adapters, hubs and unmanaged switches). Warnings for trunks whose ends
-  differ and devices set to a VLAN their port does not give.
+  USB-Ethernet adapters, hubs and unmanaged switches). Tap a device to see the VLANs it
+  is in, the devices it reaches and what its gateway may route to. Warnings for trunks
+  whose ends differ, devices set to a VLAN their port does not give, a VLAN split
+  between switches no trunk joins (a missing cable?) and VLAN ids reused where the
+  networks meet. Separate networks may reuse an id under different names.
 - **Quick cabling**: in edit mode tap a port on the map, then the other one.
 - **Cables in bulk** (consecutive ports) and a **labels CSV** for the label printer.
 - **VLANs on a range of ports** of a switch in one go.

@@ -4,7 +4,9 @@
            node tools/fixture.js --catalog      prints the extra templates the tests use
    With scale 2, 4, 8... the five projects are repeated with new numbering and the
    infrastructure grows on its own (switches, PDUs, strips, hubs), for load tests.
-   It is not shipped as data: the page starts empty and example/lab.yaml is the demo. */
+   It is not shipped as data: the page starts empty and example/lab.yaml is the demo.
+   Intentional issues: a duplicate IP, a board with no power cable, and TEST-B on the
+   isolated GOLF switch (missing uplink). networks() holds the VLAN cases. */
 'use strict';
 const fs = require('fs'), path = require('path');
 const LAB = require(path.join(__dirname, '..', 'app.js'));
@@ -60,15 +62,17 @@ const serial = () => 'SN' + pad(Math.floor(100000 + (macN * 7919 + Object.keys(S
 S.vlans = {
   'LAB': { id: 110, subnet: '10.20.10.0/24', gateway: '10.20.10.1', dns: '10.20.0.53, 10.20.0.54', scope: 'it', notes: 'Lab VLAN, managed by IT. IT DHCP on .200-.249.' },
   'TEST-A': { id: 901, subnet: '192.168.50.0/24', scope: 'local', notes: 'Radio tests. Exists only on the lab switches; no uplink, no DNS.' },
-  'TEST-B': { id: 902, subnet: '192.168.60.0/24', scope: 'local', notes: 'Control and sensor tests. Exists only on the lab switches.' },
+  'TEST-B': { id: 902, subnet: '192.168.60.0/24', gateway: '192.168.60.1', scope: 'local', notes: 'Control and sensor tests. Routed by the lab server (eth1.902).' },
   'TEST-C': { id: 903, subnet: '172.16.30.0/26', scope: 'local', notes: 'Video bench. Small subnet on purpose.' },
   'PROJ-D': { id: 340, subnet: '10.34.0.0/25', gateway: '10.34.0.1', scope: 'it', notes: 'Dedicated IT VLAN for one project.' },
-  'INSTR': { id: 120, subnet: '10.40.0.0/22', gateway: '10.40.0.1', dns: '10.20.0.53', scope: 'it', notes: 'Shared building instrumentation.' }
+  'INSTR': { id: 120, subnet: '10.40.0.0/22', gateway: '10.40.0.1', dns: '10.20.0.53', scope: 'it', notes: 'Shared building instrumentation.' },
+  'GOLF-NET': { id: 950, subnet: '10.95.0.0/24', scope: 'local', notes: 'Project GOLF bench network, isolated. Same id as HOTEL-NET on purpose: separate networks.' },
+  'HOTEL-NET': { id: 950, subnet: '10.95.0.0/24', scope: 'local', notes: 'Project HOTEL bench network, isolated. Same id and subnet as GOLF-NET, never joined.' }
 };
-const PFX = { 'LAB': '10.20.10.', 'TEST-A': '192.168.50.', 'TEST-B': '192.168.60.', 'TEST-C': '172.16.30.', 'PROJ-D': '10.34.0.' };
-const MAXH = { 'LAB': 199, 'TEST-A': 250, 'TEST-B': 99, 'TEST-C': 49, 'PROJ-D': 120 };
+const PFX = { 'LAB': '10.20.10.', 'TEST-A': '192.168.50.', 'TEST-B': '192.168.60.', 'TEST-C': '172.16.30.', 'PROJ-D': '10.34.0.', 'GOLF-NET': '10.95.0.', 'HOTEL-NET': '10.95.0.' };
+const MAXH = { 'LAB': 199, 'TEST-A': 250, 'TEST-B': 99, 'TEST-C': 49, 'PROJ-D': 120, 'GOLF-NET': 250, 'HOTEL-NET': 250 };
 const SKIP = { 'TEST-A': [60, 69], 'LAB': [150, 150] };
-const hostN = { 'LAB': 9, 'TEST-A': 10, 'TEST-B': 20, 'TEST-C': 10, 'PROJ-D': 10 };
+const hostN = { 'LAB': 9, 'TEST-A': 10, 'TEST-B': 20, 'TEST-C': 10, 'PROJ-D': 10, 'GOLF-NET': 10, 'HOTEL-NET': 10 };
 function ipNext(vlan) {
   for (;;) {
     const h = ++hostN[vlan];
@@ -172,8 +176,15 @@ power(alloc('strip-wall'), 'server-lab:ac-in2');
 dev('radiohub-1', { types: ['radiohub'], location: 'Ceiling, centre', power: 'wall', admin: 'http://{ip}:8123', notes: 'Zigbee coordinator and Thread border router', ports: ['eth0 rj45', 'zigbee zigbee', 'thread thread', 'ble ble', 'dc-in dc-in'] });
 net('radiohub-1:eth0', 'LAB', { services: 'http 8123, mqtt' });
 power(alloc('strip-ups'), 'radiohub-1:dc-in', '5 V adapter');
-dev('ap-lab-1', { types: ['ap'], location: 'Ceiling, centre', power: 'none', admin: 'https://{ip}', notes: 'PoE powered from the switch', ports: ['eth0 rj45', 'wifi wifi'] });
-net('ap-lab-1:eth0', 'LAB', { notes: 'PoE' });
+dev('ap-lab-1', { types: ['ap'], location: 'Ceiling, centre', power: 'none', admin: 'https://{ip}', notes: 'PoE powered from the switch. Two SSIDs: lab (LAB) and radio tests (TEST-A)', ports: ['eth0 rj45', 'wifi wifi', 'wifi2 wifi', 'mgmt iface'] });
+{ // the AP is managed: a trunk with LAB untagged and TEST-A tagged, one SSID per VLAN
+  net('ap-lab-1:eth0', 'LAB', { notes: 'PoE, trunk', ip: false });
+  const up = S.links[S.links.length - 1].b;
+  for (const r of ['ap-lab-1:eth0', up]) port(r).vlans = ['TEST-A'];
+  port('ap-lab-1:wifi').vlan = 'LAB'; port('ap-lab-1:wifi').notes = 'SSID lab';
+  port('ap-lab-1:wifi2').vlan = 'TEST-A'; port('ap-lab-1:wifi2').notes = 'SSID radio-tests';
+  const m = port('ap-lab-1:mgmt'); m.vlan = 'LAB'; m.ip = ipNext('LAB'); m.mac = mac(); m.services = 'https';
+}
 
 /* ---------- common pieces ---------- */
 function pc(pr, loc, o) {
@@ -318,6 +329,44 @@ function echo(s) {
 }
 
 for (let s = 1; s <= SCALE; s++) { alpha(s); bravo(s); charlie(s); delta(s); echo(s); }
+
+/* ---------- network cases (once): for the VLAN model and the VLAN map ---------- */
+function networks() {
+  /* a tablet on the second SSID: no VLAN set, it gets TEST-A from the AP */
+  dev('tablet-01', { types: ['pc'], project: 'BRAVO', location: 'Bench 2', notes: 'Tablet with the radio test app', ports: ['wifi wifi'] });
+  port('tablet-01:wifi').ip = ipNext('TEST-A'); port('tablet-01:wifi').mac = mac();
+  link('radio', 'tablet-01:wifi', 'ap-lab-1:wifi2', 'SSID radio-tests');
+  /* an unmanaged desk switch on a LAB port: what is behind it has no VLAN set and gets LAB */
+  dev('desk-sw-1', { types: ['switch'], location: 'Desk 3', power: 'wall', notes: 'Unmanaged 5-port desk switch', ports: ['p[1-5] rj45', 'dc-in dc-in'] });
+  power(alloc('strip-wall'), 'desk-sw-1:dc-in', '12 V adapter');
+  { const sw = alloc('sw'); port(sw).vlan = 'LAB'; link('net', 'desk-sw-1:p1', sw, 'Desk switch uplink'); }
+  for (const [n, pn] of [['laptop-dock-1', 'p2'], ['printer-1', 'p3']]) {
+    dev(n, { types: [n === 'printer-1' ? 'other' : 'pc'], location: 'Desk 3', power: 'wall', notes: n === 'printer-1' ? 'Label printer' : 'Docking station of a laptop', ports: ['eth0 rj45', 'ac-in ac-in'] });
+    port(n + ':eth0').ip = ipNext('LAB'); port(n + ':eth0').mac = mac();
+    link('net', n + ':eth0', 'desk-sw-1:' + pn); power(alloc('strip-wall'), n + ':ac-in');
+  }
+  /* a hypervisor: LAB untagged, TEST-B and TEST-C tagged to its virtual machines */
+  dev('hv-01', { types: ['server'], location: 'Central rack', power: 'ups', admin: 'https://{ip}', serial: serial(), notes: 'Hypervisor; its VMs use TEST-B and TEST-C tagged', ports: ['eth0 rj45', 'ac-in ac-in'] });
+  net('hv-01:eth0', 'LAB', { services: 'https, ssh' });
+  { const up = S.links[S.links.length - 1].b; for (const r of ['hv-01:eth0', up]) port(r).vlans = ['TEST-B', 'TEST-C']; }
+  power(alloc('ups'), 'hv-01:ac-in');
+  /* project GOLF: its own switch in another room, never cabled to the lab. TEST-B on it is
+     meant to be the lab TEST-B (same name), but the uplink is missing: intentional issue.
+     GOLF-NET reuses id 950 with HOTEL-NET: separate networks on purpose, no warning. */
+  const golf = (sw, vl, room, devs) => {
+    dev(sw, { types: ['switch'], location: room, power: 'wall', admin: 'https://{ip}', serial: serial(), notes: 'Managed 8-port switch of the project, not connected to the lab', ports: ['p[1-8] rj45', 'mgmt iface', 'ac-in ac-in'] });
+    power(alloc('strip-wall'), sw + ':ac-in');
+    devs.forEach(([n, v], i) => {
+      dev(n, { types: ['board'], project: sw === 'sw-golf-1' ? 'GOLF' : 'HOTEL', location: room, power: 'wall', serial: serial(), notes: 'Board of the project', ports: ['eth0 rj45', 'dc-in dc-in'] });
+      port(sw + ':p' + (i + 1)).vlan = v; port(n + ':eth0').ip = ipNext(v); port(n + ':eth0').mac = mac();
+      link('net', n + ':eth0', sw + ':p' + (i + 1)); power(alloc('strip-wall'), n + ':dc-in', '12 V adapter');
+    });
+    const m = port(sw + ':mgmt'); m.vlan = vl; m.ip = ipNext(vl);
+  };
+  golf('sw-golf-1', 'GOLF-NET', 'Room G', [['golf-01', 'GOLF-NET'], ['golf-02', 'GOLF-NET'], ['golf-03', 'TEST-B']]);
+  golf('sw-hotel-1', 'HOTEL-NET', 'Room H', [['hotel-01', 'HOTEL-NET'], ['hotel-02', 'HOTEL-NET']]);
+}
+networks();
 
 S.log.push({ t: '2026-01-12T09:00:00.000Z', by: 'fixture', msg: 'Test fixture (scale ' + SCALE + ')', rev: 1 });
 const st = LAB.normalize(S);

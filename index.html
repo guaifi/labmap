@@ -142,7 +142,9 @@ svg.vmap .vt{fill:var(--ink);font-size:11px;font-weight:700} svg.vmap .vs{fill:v
 svg.vmap .vbus{stroke-width:3;stroke-linecap:round} svg.vmap .vstub{stroke-width:1.6}
 svg.vmap .vb{fill:var(--panel);stroke:var(--ink);stroke-width:1} svg.vmap .vb.inf{stroke-dasharray:4 3}
 svg.vmap .vdev{cursor:pointer} svg.vmap .vdev.sel .vb{stroke:var(--acc);stroke-width:2.4}
-svg.vmap.has-sel .vdev:not(.sel){opacity:.45} svg.vmap .vdev.dim{opacity:.25}
+svg.vmap.has-sel .vdev:not(.sel):not(.reach):not(.routed){opacity:.25}
+svg.vmap .vdev.reach .vb{stroke:var(--ok);stroke-width:2} svg.vmap .vdev.routed .vb{stroke:var(--warn);stroke-width:1.6;stroke-dasharray:5 3}
+svg.vmap .vhead.voff{opacity:.35} svg.vmap .vhead.von .vh{stroke:var(--acc);stroke-width:2} svg.vmap .vhead.vrt .vh{stroke:var(--warn);stroke-dasharray:5 3} svg.vmap .vdev.dim{opacity:.25}
 svg.vmap .vn{fill:var(--ink);font-size:10px;font-weight:700} svg.vmap .vl{fill:var(--ink);font-size:8.5px} svg.vmap .vbad{fill:var(--acc);font-size:8.5px;font-weight:700}
 .vhelp{font-size:13px;margin:4px 0} .vhelp summary{cursor:pointer;color:var(--mut)} .vhelp ul{margin:6px 0;padding-left:18px} .vhelp li{margin:2px 0}
 svg.map .ltag rect{fill:var(--tag)} svg.map .ltag text{fill:var(--tag-ink);font-size:8.5px;font-weight:700}
@@ -280,7 +282,8 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
         <li><b>T</b>, tagged (802.1Q): several VLANs on one cable, each frame marked with its VLAN. The device must be set up for it (sub-interfaces such as eth0.20).</li>
         <li><b>Trunk</b>: a port with tagged VLANs, usually between switches. Both ends must list the same VLANs.</li>
         <li>Dashed box: the VLAN comes from the switch port (and adapters, hubs, unmanaged switches) shown below its name.</li>
-        <li>Under each title: the switches that carry it. <b>split</b>: two groups of switches no trunk joins; devices on each side cannot see the other.</li>
+        <li>Under each title: the switches that carry it. <b>split</b>: two groups of switches no trunk joins; devices on each side cannot see the other. If they are separate networks on purpose, give each its own VLAN name (the id may repeat).</li>
+        <li>Tap a device: its VLANs stand out, green boxes are the devices it reaches, dashed ones what its gateway (GW) may route to, if its rules allow.</li>
       </ul></details>
       <div class="row">
         <button class="btn sm" data-act="zoom" data-z="-1" aria-label="Zoom out">−</button>
