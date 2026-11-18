@@ -137,16 +137,35 @@ svg.map .lk.far .v{opacity:.45}
 svg.map.has-sel .lk:not(.hl){opacity:.1}
 svg.map .lk.hl .v{opacity:1}
 svg.map .lk.hl .v{stroke-width:3}
+svg.vmap .vh{fill:var(--panel2);stroke:var(--line)} svg.vmap .vhead{cursor:pointer}
+svg.vmap .vt{fill:var(--ink);font-size:11px;font-weight:700} svg.vmap .vs{fill:var(--mut);font-size:8.5px} svg.vmap .vwarn{fill:var(--warn)}
+svg.vmap .vbus{stroke-width:3;stroke-linecap:round} svg.vmap .vstub{stroke-width:1.6}
+svg.vmap .vb{fill:var(--panel);stroke:var(--ink);stroke-width:1} svg.vmap .vb.inf{stroke-dasharray:4 3}
+svg.vmap .vdev{cursor:pointer} svg.vmap .vdev.sel .vb{stroke:var(--acc);stroke-width:2.4}
+svg.vmap.has-sel .vdev:not(.sel){opacity:.45} svg.vmap .vdev.dim{opacity:.25}
+svg.vmap .vn{fill:var(--ink);font-size:10px;font-weight:700} svg.vmap .vl{fill:var(--ink);font-size:8.5px} svg.vmap .vbad{fill:var(--acc);font-size:8.5px;font-weight:700}
+.vhelp{font-size:13px;margin:4px 0} .vhelp summary{cursor:pointer;color:var(--mut)} .vhelp ul{margin:6px 0;padding-left:18px} .vhelp li{margin:2px 0}
 svg.map .ltag rect{fill:var(--tag)} svg.map .ltag text{fill:var(--tag-ink);font-size:8.5px;font-weight:700}
+svg.map .ltag.nolab rect{fill:var(--panel);stroke:var(--mut);stroke-dasharray:2 2} svg.map .ltag.nolab text{fill:var(--mut);font-weight:400}
 .ln-net .v{stroke:var(--L-net)!important}.ln-power .v{stroke:var(--L-power)!important}.ln-serial .v{stroke:var(--L-serial)!important}
 .ln-jtag .v{stroke:var(--L-jtag)!important}.ln-usb .v{stroke:var(--L-usb)!important}.ln-video .v{stroke:var(--L-video)!important}
 .ln-bus .v{stroke:var(--L-bus)!important}.ln-rf .v{stroke:var(--L-rf)!important}.ln-radio .v{stroke:var(--L-radio)!important}
 .ln-discrete .v{stroke:var(--L-discrete)!important}.ln-other .v{stroke:var(--L-other)!important}
+.ps-net{stroke:var(--L-net)}.ps-power{stroke:var(--L-power)}.ps-serial{stroke:var(--L-serial)}.ps-jtag{stroke:var(--L-jtag)}.ps-usb{stroke:var(--L-usb)}
+.ps-video{stroke:var(--L-video)}.ps-bus{stroke:var(--L-bus)}.ps-rf{stroke:var(--L-rf)}.ps-radio{stroke:var(--L-radio)}.ps-discrete{stroke:var(--L-discrete)}.ps-other{stroke:var(--L-other)}
+svg.map .free{fill:var(--panel);stroke-width:1.3}
+svg.map .pt.fr{fill:var(--mut)}
+svg.map .phit{fill:transparent;cursor:pointer}
+svg.map .prt:hover .phit{fill:var(--acc);opacity:.12}
+svg.map .prt.pend .phit{fill:var(--acc);opacity:.3}
+svg.map .prt.can .phit{fill:var(--ok);opacity:.14}
+svg.map .prt.cant{opacity:.3}
 .pf-net{fill:var(--L-net)}.pf-power{fill:var(--L-power)}.pf-serial{fill:var(--L-serial)}.pf-jtag{fill:var(--L-jtag)}.pf-usb{fill:var(--L-usb)}
 .pf-video{fill:var(--L-video)}.pf-bus{fill:var(--L-bus)}.pf-rf{fill:var(--L-rf)}.pf-radio{fill:var(--L-radio)}.pf-discrete{fill:var(--L-discrete)}.pf-other{fill:var(--L-other)}
 .k{display:inline-block;font:11px var(--mono);padding:0 5px;border-radius:3px;border:1px solid currentColor;color:var(--L-other);white-space:nowrap}
 .k-net{color:var(--L-net)}.k-power{color:var(--L-power)}.k-serial{color:var(--L-serial)}.k-jtag{color:var(--L-jtag)}.k-usb{color:var(--L-usb)}
 .k-video{color:var(--L-video)}.k-bus{color:var(--L-bus)}.k-rf{color:var(--L-rf)}.k-radio{color:var(--L-radio)}.k-discrete{color:var(--L-discrete)}
+.tag.nolab{background:none;color:var(--mut);font-weight:400;outline:1px dashed var(--mut);outline-offset:-1px}
 .tag{display:inline-block;font:700 11px var(--mono);background:var(--tag);color:var(--tag-ink);padding:2px 6px;border:0;border-radius:2px;white-space:nowrap}
 button.tag{min-height:26px}
 
@@ -252,7 +271,17 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
         <input class="grow" id="q" type="search" placeholder="Search: name, IP, MAC, serial" autocomplete="off" aria-label="Search the map">
         <select class="grow" id="f-proj" aria-label="Filter by project"></select>
       </div>
+      <div class="lays" id="views" role="group" aria-label="Map view"><button class="lay on" data-act="view" data-v="phys">Physical</button><button class="lay" data-act="view" data-v="vlan">VLANs</button></div>
       <div class="lays" id="layers"></div>
+      <details class="vhelp" id="vhelp" hidden><summary>How to read the VLAN map</summary><ul>
+        <li>Each column is a VLAN: one network. Devices in a column reach each other directly.</li>
+        <li>A box across columns is in several VLANs: a router, or a server with sub-interfaces.</li>
+        <li><b>Untagged</b> (access): the switch port gives one VLAN; the device needs no setup.</li>
+        <li><b>T</b>, tagged (802.1Q): several VLANs on one cable, each frame marked with its VLAN. The device must be set up for it (sub-interfaces such as eth0.20).</li>
+        <li><b>Trunk</b>: a port with tagged VLANs, usually between switches. Both ends must list the same VLANs.</li>
+        <li>Dashed box: the VLAN comes from the switch port (and adapters, hubs, unmanaged switches) shown below its name.</li>
+        <li>Under each title: the switches that carry it. <b>split</b>: two groups of switches no trunk joins; devices on each side cannot see the other.</li>
+      </ul></details>
       <div class="row">
         <button class="btn sm" data-act="zoom" data-z="-1" aria-label="Zoom out">−</button>
         <button class="btn sm" data-act="zoom" data-z="1" aria-label="Zoom in">+</button>

@@ -141,7 +141,10 @@ pool('sw', (p, n) => {
     dev('it-socket-1', { types: ['other'], location: 'North wall', notes: 'Link to the corporate network (IT). Do not touch without notice.', ports: ['rj45 rj45'] });
     link('net', name + ':p24', 'it-socket-1:rj45', 'LAB VLAN uplink to IT');
     port(name + ':p24').vlan = 'LAB';
-  } else if (n <= 5) link('net', name + ':sfp1', 'sw-lab-1:sfp' + (n - 1), 'Trunk between switches (all VLANs)');
+  } else if (n <= 5) {
+    link('net', name + ':sfp1', 'sw-lab-1:sfp' + (n - 1), 'Trunk between switches (all VLANs)');
+    for (const t of [name + ':sfp1', 'sw-lab-1:sfp' + (n - 1)]) { port(t).vlan = 'LAB'; port(t).vlans = ['TEST-A', 'TEST-B', 'TEST-C', 'PROJ-D']; }      // LAB untagged, the rest tagged
+  }
 });
 pool('srvusb', p => { p.free = p.n === 1 ? outs('server-lab', 'usb', 8) : []; });
 for (const g of ['a', 'b']) pool('hub-' + g, p => {
@@ -161,7 +164,7 @@ net('server-lab:bmc', 'LAB', { services: 'https, ipmi' });
 { // trunk with the test VLANs
   const sw = alloc('sw'); link('net', 'server-lab:eth1', sw, '802.1Q trunk with TEST-A, TEST-B and TEST-C');
   port('server-lab:eth1').mac = mac(); port('server-lab:eth1').notes = 'Trunk; the IPs are on the eth1.90x interfaces';
-  port(sw).notes = 'Trunk 901-903';
+  port(sw).notes = 'Trunk 901-903'; port(sw).vlans = ['TEST-A', 'TEST-B', 'TEST-C'];
   for (const [i, v] of [['901', 'TEST-A'], ['902', 'TEST-B'], ['903', 'TEST-C']]) { const p = port('server-lab:eth1.' + i); p.vlan = v; p.ip = PFX[v] + '1'; p.notes = 'Sub-interface of VLAN ' + i; }
 }
 power(alloc('ups'), 'server-lab:ac-in1');

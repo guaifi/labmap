@@ -15,6 +15,12 @@ uses. One web page, one small Python server, two YAML files. No dependencies.
 - **IP addresses** per VLAN: grid of free / on a port / noted / conflicting addresses,
   netmask, gateway, DNS, "give me a free IP", and the ports in each VLAN (access and
   tagged trunk ports).
+- **VLAN map**: the logical view next to the physical one. One column per VLAN with
+  its members, the switches it spans and where it is split; built from the cables and
+  the switch ports (a device gets the VLAN of the port it is plugged into, also through
+  USB-Ethernet adapters, hubs and unmanaged switches). Warnings for trunks whose ends
+  differ and devices set to a VLAN their port does not give.
+- **Quick cabling**: in edit mode tap a port on the map, then the other one.
 - **Cables in bulk** (consecutive ports) and a **labels CSV** for the label printer.
 - **VLANs on a range of ports** of a switch in one go.
 - **Validation** that never blocks: duplicate IP or MAC, cable to a missing port,
@@ -251,8 +257,13 @@ over it.
   `ac-in`, `rs232`...). Only network port types take VLAN, IP, MAC and services.
 - A **cable** joins two ports and has an id (`N-001` network, `P-001` power, `S-`
   serial, `J-` JTAG, `U-` USB, `V-` video, `B-` buses, `R-` RF, `W-` radio, `D-`
-  discrete, `X-` other) that goes on the physical label at both ends. For power, the
+  discrete, `X-` other). Tick **Physical label** for the cables that carry it on a label
+  at both ends (the fixed ones); the rest keep the id only in Labmap. For power, the
   first end is the outlet.
+- **VLANs** on a switch port: the **access** (untagged) VLAN is what a device plugged
+  there gets; **tagged** VLANs travel marked on the same cable, for another switch or a
+  device set up for them (`eth0.20`). A port with tagged VLANs is a **trunk**; both ends
+  must list the same ones. Device names do not need to follow any pattern.
 - **Pass-through devices** (adapters, hubs, bus couplers) are crossed by routes.
 - **Relay boards** use paired `relay-in` / `relay-out` ports: outlet N depends only on
   inlet N.
