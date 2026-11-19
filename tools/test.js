@@ -516,14 +516,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       hotel: [...h.direct].sort().join(), sameId: (M.sameId['GOLF-NET'] || []).join(), idWarn: codes.filter(c => /^vlan-id/.test(c)).length, dupIp: codes.filter(c => /10\.95\.0\./.test(c)).length,
       desk: mem('LAB', 'printer-1').map(m => m.how + ' ' + m.att + ' ' + m.via.join()).join(), tablet: mem('TEST-A', 'tablet-01').map(m => m.how + ' ' + m.att).join(),
       hv: ['TEST-B', 'TEST-C'].map(v => mem(v, 'hv-01').map(m => m.mode + '/' + m.how + '/' + (m.ip || '-')).join()).join(' '),
-      apOk: !codes.some(c => /ap-lab-1/.test(c))
+      apOk: !codes.some(c => /ap-lab-1/.test(c)), apMsg: codes.filter(c => /ap-lab-1/.test(c)).join(' / ')
     };
   });
   ok(nc.unitSees && nc.unitRouted === 'server-lab>LAB,server-lab>TEST-A,server-lab>TEST-C' && nc.unitRoutedDev, 'unit-01 sees the TEST-B devices on the joined switches, and through its gateway (server-lab) may reach LAB, TEST-A and TEST-C', nc.unitRouted);
   ok(nc.golfSees === 0 && nc.golfSplit === 1, 'the same VLAN (name and id) on a switch no trunk joins: its device sees nobody, and it is warned as a likely missing cable');
   ok(nc.hotel === 'hotel-02,sw-hotel-1' && nc.sameId === 'HOTEL-NET' && !nc.idWarn && !nc.dupIp, 'two separate networks reusing id 950 under different names: no warning, no false duplicate IPs, each sees only its own', nc.hotel);
   ok(nc.desk === 'switch sw-lab-2:p17 desk-sw-1' && nc.tablet === 'switch ap-lab-1:wifi2', 'devices behind an unmanaged desk switch, and a tablet on the second SSID of the AP, get their VLAN with nothing set on them', nc.desk + ' | ' + nc.tablet);
-  ok(nc.hv === 'tagged/set/- tagged/set/-' && nc.apOk, 'a hypervisor lists its tagged VLANs (no address shown there); the AP trunk is consistent', nc.hv);
+  ok(nc.hv === 'tagged/set/- tagged/set/-' && nc.apOk, 'a hypervisor lists its tagged VLANs (no address shown there); the AP trunk is consistent', nc.hv + ' ' + nc.apMsg);
   const clash = await page.evaluate(() => {
     LAB.commit('test: id clash', s => { s.vlans['TEST-X'] = { id: 902, subnet: '192.168.61.0/24' }; s.devices['sw-lab-2'].ports.find(p => p.name === 'p18').vlan = 'TEST-X'; });
     const a = LAB.index.issues.filter(i => i.code === 'vlan-id').map(i => i.msg);
@@ -560,6 +560,35 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(/Networks LAB \(\d+\), TEST-B \(\d+\), TEST-C \(\d+\)/.test(net) && await page.evaluate(() => LAB.ui.tab === 'map' && LAB.ui.view === 'vlan' && LAB.ui.sel === 'hv-01'), 'the device sheet says its networks, and "VLAN map" shows it selected there');
   await page.evaluate(() => { LAB.ui.sel = null; LAB.ui.view = 'phys'; LAB.setTab('map'); });
   await page.fill('#dq', '').catch(() => {});
+  ok(errors.length === 0, 'no console errors', errors.join(' | '));
+
+
+  console.log('7f. Two VLANs joined by an untagged cable (an IT access port on a switch default VLAN)');
+  const joinY = ['vlans:', '  DEFAULT: { id: 1 }', '  IT-NET: { id: 89, subnet: "10.89.0.0/24", gateway: "10.89.0.1" }']
+    .concat([20, 21, 22].map(n => `  V${n}: { id: ${n}, subnet: "192.168.${n}.0/24" }`))
+    .concat(['devices:', '  sw-desk:', '    types: [switch]', '    ports:'])
+    .concat(Array.from({ length: 22 }, (_, i) => `      - { name: p${i + 1}, kind: rj45, vlan: ${i + 1 >= 20 ? 'V' + (i + 1) : 'DEFAULT'}${i + 1 === 2 ? ', vlans: [V20, V21, V22]' : ''} }`))
+    .concat(['  it-sw:', '    types: [switch]', '    ports:', '      - { name: p7, kind: rj45, vlan: IT-NET }', '      - { name: p8, kind: rj45, vlan: IT-NET }', '      - { name: gw, kind: iface, ip: "10.89.0.1", vlan: IT-NET }',
+      '  pi:', '    types: [server]', '    ports:', '      - { name: eth0, kind: rj45, ip: "10.89.0.50", vlan: IT-NET }'])
+    .concat([20, 21, 22].map(n => `      - { name: eth0.${n}, kind: iface, ip: "192.168.${n}.1", vlan: V${n} }`))
+    .concat(['  dev5:', '    types: [board]', '    ports:', '      - { name: eth0, kind: rj45, ip: "10.89.0.55" }', '  dev20:', '    types: [board]', '    ports:', '      - { name: eth0, kind: rj45, ip: "192.168.20.10" }',
+      '  pc-it:', '    types: [pc]', '    ports:', '      - { name: eth0, kind: rj45, ip: "10.89.0.30" }',
+      'links:', '  - { id: N-001, type: net, a: "it-sw:p7", b: "sw-desk:p1" }', '  - { id: N-002, type: net, a: "pi:eth0", b: "sw-desk:p2" }', '  - { id: N-003, type: net, a: "dev5:eth0", b: "sw-desk:p5" }',
+      '  - { id: N-004, type: net, a: "dev20:eth0", b: "sw-desk:p20" }', '  - { id: N-005, type: net, a: "pc-it:eth0", b: "it-sw:p8" }']).join('\n');
+  const jn = await page.evaluate(y => {
+    const st = LAB.parseYaml(y); st.catalog = JSON.parse(JSON.stringify(LAB.state.catalog)); LAB.load(st);
+    const reach = n => [...LAB.reachOf(n).direct].sort().join();
+    LAB.ui.view = 'vlan'; LAB.ui.sel = null; LAB.setTab('map');
+    const heads = [...document.querySelectorAll('svg.vmap .vhead')].map(g => g.textContent);
+    const ipPi = LAB.ipInfo('IT-NET', LAB.ipToInt('10.89.0.55')).fixed.join();
+    LAB.ui.vlan = 'DEFAULT'; LAB.setTab('ips'); const ipsTxt = document.getElementById('ips').textContent;
+    LAB.ui.view = 'phys'; LAB.setTab('map');
+    return { issues: LAB.index.issues.map(i => i.msg), dev5: reach('dev5'), pi: reach('pi'), dev20: reach('dev20'), head: heads.find(h => /IT-NET/.test(h)) || '', ipPi, same: /Same network as IT-NET: joined untagged on cable N-001/.test(ipsTxt) };
+  }, joinY);
+  ok(!jn.issues.length && jn.dev5 === 'it-sw,pc-it,pi' && jn.pi === 'dev20,dev5,it-sw,pc-it' && jn.dev20 === 'pi', 'an untagged cable from an IT access port (IT-NET) to a switch default VLAN (DEFAULT) joins them: one network, no warning; the Pi set to IT-NET on a DEFAULT port is fine', JSON.stringify(jn.issues));
+  ok(/^IT-NET · 89 \+ DEFAULT · 1/.test(jn.head) && /joined untagged at N-001/.test(jn.head) && jn.ipPi === 'dev5:eth0' && jn.same, 'the VLAN map shows "IT-NET + DEFAULT" as one column; IPs of DEFAULT devices go to the IT-NET grid; the IPs tab says they are the same network', jn.head);
+  const trunkJoin = await page.evaluate(() => { LAB.commit('test: native mismatch on a trunk', s => { s.devices['it-sw'].ports[0].vlans = ['V20']; s.devices['sw-desk'].ports[0].vlans = ['V20']; }); return LAB.index.issues.filter(i => i.code === 'trunk-untagged').map(i => i.msg); });
+  ok(trunkJoin.length === 1 && /untagged VLAN IT-NET on it-sw:p7, DEFAULT on sw-desk:p1 on a trunk: they become one network/.test(trunkJoin[0]), 'on a trunk the same mismatch is warned (native VLANs that differ are usually a mistake)', trunkJoin.join(' | '));
   ok(errors.length === 0, 'no console errors', errors.join(' | '));
 
   console.log('8. Desktop, dark theme; home network, example button and load at scale 4');

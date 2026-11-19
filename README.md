@@ -158,6 +158,9 @@ or move its folder in `sites/`.
   for them (`eth0.20`). A port with tagged VLANs is a **trunk**; both ends must match.
   A VLAN is a name plus an id: the same name on switches no trunk joins is warned
   (missing cable?); separate networks use different names, even with the same id.
+  An untagged cable between two switches with different VLANs (an IT access port into
+  your switch's default VLAN) joins them into one network; set each switch port as it
+  is configured on that switch.
 - **Users**: no accounts. Each person types a short user name once, for the log. One
   person edits a site at a time.
 

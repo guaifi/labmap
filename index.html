@@ -283,6 +283,7 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
         <li><b>Trunk</b>: a port with tagged VLANs, usually between switches. Both ends must list the same VLANs.</li>
         <li>Dashed box: the VLAN comes from the switch port (and adapters, hubs, unmanaged switches) shown below its name.</li>
         <li>Under each title: the switches that carry it. <b>split</b>: two groups of switches no trunk joins; devices on each side cannot see the other. If they are separate networks on purpose, give each its own VLAN name (the id may repeat).</li>
+        <li><b>A + B</b>: two VLANs joined by an untagged cable (for example an IT access port on your switch's default VLAN). Each switch calls it by its own VLAN; it is one network.</li>
         <li>Tap a device: its VLANs stand out, green boxes are the devices it reaches, dashed ones what its gateway (GW) may route to, if its rules allow.</li>
       </ul></details>
       <div class="row">
