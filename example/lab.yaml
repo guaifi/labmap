@@ -1,6 +1,6 @@
 # LABMAP DATABASE · lab: devices, cables, VLANs, IPs and change log
 # DO NOT EDIT BY HAND: change it from the web page. This file is the stored copy.
-# Labmap 0.9.0 · rev 1
+# Labmap 0.9.1 · rev 1
 rev: 1
 format: 1
 vlans:
