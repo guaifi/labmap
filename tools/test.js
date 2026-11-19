@@ -533,7 +533,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     return { a, b };
   });
   ok(clash.a.length === 1 && /sw-lab-2 has VLANs TEST-B and TEST-X with the same id 902/.test(clash.a[0]), 'two VLAN names with the same id on one switch are warned: for the switch they are one', clash.a[0]);
-  ok(clash.b.some(m => /VLAN id 902 is TEST-B on sw-lab-1:sfp1 and TEST-X on sw-lab-2:sfp1/.test(m)), 'and so are different names with the same id on the two ends of a trunk', clash.b.join(' | '));
+  ok(clash.b.filter(m => /^Cable N-024: VLAN id 902 is TEST-B on sw-lab-1:sfp1 and TEST-X on sw-lab-2:sfp1/.test(m)).length === 1, 'and so are different names with the same id on the two ends of a trunk (once)', clash.b.join(' | '));
+  const side2 = await page.evaluate(() => {
+    LAB.commit('test: trunk side 1', s => { const t = s.devices['sw-lab-1'].ports.find(p => p.name === 'sfp1'); t.vlans = t.vlans.filter(v => v !== 'PROJ-D'); });
+    const m = LAB.index.issues.filter(i => i.code === 'trunk-tagged' && /PROJ-D/.test(i.msg)).map(i => i.msg);
+    LAB.commit('test: trunk back', s => { s.devices['sw-lab-1'].ports.find(p => p.name === 'sfp1').vlans.push('PROJ-D'); });
+    const svg = LAB.exportVlanSvg();
+    return { m, css: /svg\.vmap \.vbus/.test(svg) && /svg\.vmap \.vb\b/.test(svg) };
+  });
+  ok(side2.m.length === 1 && /PROJ-D tagged on sw-lab-2:sfp1, not on sw-lab-1:sfp1/.test(side2.m[0]), 'a VLAN missing on either end of a trunk is found, whichever switch is checked first', side2.m.join(' | '));
+  ok(side2.css, 'the VLAN map SVG carries its own styles');
   await page.evaluate(() => { LAB.ui.view = 'vlan'; LAB.ui.sel = 'unit-01'; LAB.setTab('map'); });
   const vsel = await page.evaluate(() => {
     const cls = n => { const g = [...document.querySelectorAll('svg.vmap .vdev')].find(x => x.dataset.dev === n); return g ? g.getAttribute('class') : ''; };
@@ -582,7 +591,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     LAB.load(LAB.parseYaml(y)); LAB.setTab('map');
     return { boxes: document.querySelectorAll('svg.map .dev').length, lines: document.querySelectorAll('svg.map .lk').length, issues: LAB.index.issues.map(i => i.msg), down: LAB.cascade(new Set(['ups-dc'])).down.join(), gw: LAB.ipInfo('HOME', LAB.ipToInt('192.168.1.1')).state };
   });
-  ok(await desk.evaluate(() => { const m = LAB.index.l2.vlans.HOME.members; return ['homeassistant', 'nas', 'garden-camera'].every(n => m.some(x => x.dev === n)) && m.find(x => x.dev === 'router').gw; }), 'home network: devices behind the router get its VLAN; the router is the gateway');
+  ok(await desk.evaluate(() => { const m = LAB.index.l2.vlans.HOME.members; return ['homeassistant', 'nas', 'garden-camera'].every(n => m.some(x => x.dev === n)) && m.find(x => x.dev === 'router').gw && m.every(x => !x.att || x.att.startsWith('router:')); }), 'home network: devices behind the router get its VLAN; the router is the gateway');
   ok(home.boxes === 10 && home.lines === 10 && home.down === 'homeassistant,router' && home.gw === 'fixed' && home.issues.length === 0, 'a home network written in YAML: 10 devices, 10 links, no issues; UPS off takes down router and Home Assistant', home.issues.join(' | '));
   await desk.screenshot({ path: path.join(SHOTS, 'home-1280.png') });
   await desk.evaluate(() => { LAB.ui.user = 'test'; });

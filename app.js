@@ -758,12 +758,16 @@ function l2Model() {
           edgeSeen.add(k);
           const A = IX.ports.get(sp).p, B = IX.ports.get(r.end).p, cb = carry(r.end), lk = { link: r.hops[0].link.id, dev: n };
           if (A.vlan && B.vlan && A.vlan !== B.vlan) warn('trunk-untagged', `Cable ${ids(r)}: untagged VLAN ${A.vlan} on ${sp}, ${B.vlan} on ${r.end}`, lk);
-          for (const v of c.t) {
-            if (cb.t.includes(v)) continue;
-            const twin = idOf(v) && all(cb).find(w => w !== v && idOf(w) === idOf(v));      // same number, another name: on the wire they are one
-            if (twin) warn('vlan-id', `Cable ${ids(r)}: VLAN id ${idOf(v)} is ${v} on ${sp} and ${twin} on ${r.end}: on the cable they are one network`, lk);
-            else warn('trunk-tagged', `Cable ${ids(r)}: VLAN ${v} tagged on ${sp}, not on ${r.end}`, lk);
-          }
+          const done = new Set();
+          const side = (P, Q, cp, cq) => {                         // tagged on P and not on Q; checked both ways
+            for (const v of cp.t) {
+              if (cq.t.includes(v)) continue;
+              const twin = idOf(v) && all(cq).find(w => w !== v && idOf(w) === idOf(v));      // same number, another name: on the wire they are one
+              if (!twin) warn('trunk-tagged', `Cable ${ids(r)}: VLAN ${v} tagged on ${P}, not on ${Q}`, lk);
+              else if (!done.has(idOf(v))) { done.add(idOf(v)); warn('vlan-id', `Cable ${ids(r)}: VLAN id ${idOf(v)} is ${v} on ${P} and ${twin} on ${Q}: on the cable they are one network`, lk); }
+            }
+          };
+          side(sp, r.end, c, cb); side(r.end, sp, cb, c);
           for (const v of all(c)) if (all(cb).includes(v)) join(v, n, E);
           continue;
         }
@@ -780,7 +784,7 @@ function l2Model() {
         /* a host, maybe through an adapter: its interface is the last network port on the way */
         const ipRef = lastNet(r), IP = IX.ports.get(ipRef), own = IP && isNetKind(IP.p.kind) ? IP.p : null;
         seen.add(ipRef); seen.add(r.end);
-        const set = own && own.vlan, u = set || c.u, x = { dev: E, iface: ipRef, ip: own ? own.ip || '' : '', att: sp, via: vias.filter(v => v !== E), br };
+        const set = own && own.vlan, u = set || c.u, x = { dev: E, iface: ipRef, ip: own ? own.ip || '' : '', att: hostSrc ? '' : sp, via: vias.filter(v => v !== E), br };
         if (set && c.u && set !== c.u && !c.t.includes(set)) warn('host-vlan', `${ipRef}: set to VLAN ${set}, but ${sp} gives ${c.u}`, { dev: E, link: r.hops[0].link.id });
         const host = IP ? S.devices[IP.dev] : null, subs = host ? subIfaces(host, IP.p.name) : [];
         if (u) member(u, Object.assign({ mode: 'untagged', how: set ? 'set' : 'switch' }, x)); else if (!subs.some(sb => sb.vlan) && !c.t.length) out.none.push({ ref: ipRef, att: sp });
@@ -1824,7 +1828,7 @@ function vlanSvg(o) {
   }
   for (const [i, list] of L.single) for (const o of list) {
     const x = L.colX(i) + 18, w = M.CW - 18, bx = L.busX(i), col = L.cols[i].color, m = o.ms[0];
-    const where = (m.att ? m.att : m.how === 'set' ? 'set on the device' : m.how === 'l3' ? 'interface of the switch' : '') + (m.via && m.via.length ? ' · via ' + m.via.join(', ') : '');
+    const where = [m.att || (m.how === 'set' ? 'set on the device' : m.how === 'l3' ? 'interface of the switch' : ''), m.via && m.via.length ? 'via ' + m.via.join(', ') : ''].filter(Boolean).join(' · ');
     out.push(`<line class="vstub" x1="${bx}" x2="${x}" y1="${o.y + 14}" y2="${o.y + 14}" style="stroke:${col}"/><circle cx="${bx}" cy="${o.y + 14}" r="3" style="fill:${col}"/>`);
     out.push(`<g class="${dc(o.n)}" data-act="dev" data-dev="${esc(o.n)}" data-map="1"><rect class="vb${m.how === 'switch' ? ' inf' : ''}" x="${x}" y="${o.y}" width="${w}" height="${M.BOX}" rx="5"/>`);
     out.push(t(x + 7, o.y + 13, 'vn', tr(o.n, 22)) + (badges(m) ? t(x + w - 6, o.y + 13, 'vbad', badges(m).trim(), ' text-anchor="end"') : ''));
@@ -1840,7 +1844,7 @@ function mapCss() {
   const root = document.documentElement, had = root.getAttribute('data-theme');
   root.setAttribute('data-theme', 'light');
   const cs = getComputedStyle(root), out = [];
-  for (const sh of document.styleSheets) { let rules = []; try { rules = sh.cssRules; } catch (e) {} for (const r of rules) if (r.selectorText && /svg\.map|\.ln-|\.pf-|\.ps-/.test(r.selectorText)) out.push(r.cssText); }
+  for (const sh of document.styleSheets) { let rules = []; try { rules = sh.cssRules; } catch (e) {} for (const r of rules) if (r.selectorText && /svg\.v?map|\.ln-|\.pf-|\.ps-/.test(r.selectorText)) out.push(r.cssText); }
   const css = out.join('\n').replace(/var\((--[\w-]+)\)/g, (m, v) => cs.getPropertyValue(v).trim() || m);
   if (had == null) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', had);
   return css;
@@ -1967,7 +1971,7 @@ function renderIps() {
     const isl = X.islands.filter(i => i.length);
     h += `<p class="mut">${isl.length ? (isl.length > 1 ? 'Split: ' : 'On ') + esc(isl.map(i => i.join(', ')).join(' | ')) : 'On no switch'}</p>`;
     h += `<h3>Members of ${esc(vn)} (${mem.length})</h3><div class="list">`;
-    for (const m of mem) h += `<div class="item">${refBtn(m.iface)}<span class="chip">${m.how === 'l3' ? 'switch interface' : m.mode}${m.gw ? ' · gateway' : ''}</span><span class="mono">${esc(m.ip)}</span><span class="sub">${m.att ? 'from ' + esc(m.att) : 'set on the device'}${m.via && m.via.length ? ' · via ' + esc(m.via.join(', ')) : ''}</span></div>`;
+    for (const m of mem) h += `<div class="item">${refBtn(m.iface)}<span class="chip">${m.how === 'l3' ? 'switch interface' : m.mode}${m.gw ? ' · gateway' : ''}</span><span class="mono">${esc(m.ip)}</span><span class="sub">${m.att ? 'from ' + esc(m.att) : m.how === 'set' ? 'set on the device' : m.how === 'l3' ? '' : 'deduced'}${m.via && m.via.length ? ' · via ' + esc(m.via.join(', ')) : ''}</span></div>`;
     h += (mem.length ? '' : '<div class="item mut">No members.</div>') + '</div>';
   } else h += '<p class="mut">No VLANs.</p>';
   const lost = IX.ip[''];
@@ -2080,7 +2084,7 @@ function vlanCell(ref, p) {
   const c = IX.l2.carry.get(ref), ms = IX.l2.byIface.get(ref) || [];
   if (c) return (p.vlan ? esc(p.vlan) : c.u ? `<span class="mut">${esc(c.u)} · default</span>` : '') + (c.t.length ? `<br><span class="mut">tagged: ${esc(c.t.join(', '))}</span>` : '');
   const u = ms.find(m => m.mode === 'untagged'), t = ms.filter(m => m.mode === 'tagged').map(m => m.vlan);
-  return (p.vlan ? esc(p.vlan) : u ? `<span class="mut">${esc(u.vlan)} · from ${esc(u.att || '?')}</span>` : '') + (t.length ? `<br><span class="mut">tagged: ${esc(t.join(', '))}</span>` : '');
+  return (p.vlan ? esc(p.vlan) : u ? `<span class="mut">${esc(u.vlan)} · ${u.att ? 'from ' + esc(u.att) : u.via && u.via.length ? 'via ' + esc(u.via.join(', ')) : 'deduced'}</span>` : '') + (t.length ? `<br><span class="mut">tagged: ${esc(t.join(', '))}</span>` : '');
 }
 const VLAN_HELP = '<details class="vhelp"><summary>Access, tagged, trunk?</summary><ul><li><b>Access VLAN</b> (untagged): what a device plugged here gets, with no setup on the device. One per port.</li><li><b>Tagged VLANs</b> (802.1Q): extra VLANs on the same cable, each frame marked. Only for another switch, or a device set up for them (eth0.20).</li><li><b>Trunk</b>: a port with tagged VLANs. Both ends of the cable must list the same ones.</li></ul></details>';
 
