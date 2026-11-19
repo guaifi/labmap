@@ -98,26 +98,23 @@ If it does not start, `journalctl -u labmap -n 20 --no-pager` says why.
 ## Update
 
 The data in `/var/lib/labmap` is never touched; only the code changes. The version in
-use is shown next to the title.
-
-With Git (replace `v0.9.1` with the version you want, older ones included):
+use is shown next to the title. First say which version you want (the latest is on the
+[releases](https://github.com/guaifi/labmap/releases) page; an older one to go back):
 
 ```bash
-cd /opt/labmap && sudo git fetch --depth 1 origin tag v0.9.1 && sudo git checkout v0.9.1 && sudo systemctl restart labmap
+V=v0.9.0
 ```
 
-With the archive in `/tmp`:
+With Git:
 
 ```bash
-sudo systemctl stop labmap
+cd /opt/labmap && sudo git fetch --depth 1 origin tag $V && sudo git checkout $V && sudo systemctl restart labmap
 ```
 
-```bash
-sudo rm -rf /opt/labmap && sudo mkdir /opt/labmap && sudo tar xzf /tmp/labmap-0.9.1.tar.gz --strip-components=1 -C /opt/labmap
-```
+Without Internet access, copy `labmap-0.9.0.tar.gz` (that version) to `/tmp` and:
 
 ```bash
-sudo systemctl start labmap
+sudo systemctl stop labmap && sudo rm -rf /opt/labmap && sudo mkdir /opt/labmap && sudo tar xzf /tmp/labmap-${V#v}.tar.gz --strip-components=1 -C /opt/labmap && sudo systemctl start labmap
 ```
 
 Reload the page in the browser afterwards. New templates of a newer version are not
