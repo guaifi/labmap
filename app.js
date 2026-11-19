@@ -160,8 +160,13 @@
      the devices it sees and, dashed, what its gateway may route to. The cable
      wizard proposes, for a network port, a switch port of the same VLAN first.
      Physical position in the room is not used.
+   · Ports text: "name type [VLAN] [+tagged,…]" (parsePorts, portsToText with VLANs in
+     the device wizard only; templates keep "name type"). In the wizard the text and
+     the per-port VLAN fields stay in step (textToMeta, metaToText).
    · Exports: Map SVG is the whole lab whatever the filters, with its CSS inlined
-     (light theme); Report HTML is one static file (map + tables) to print as PDF;
+     (light theme) and a small script (svgScript) so a tap still highlights, also
+     inside the report; the VLAN map SVG carries each device's reach precomputed.
+     Report HTML is one static file (map + tables) to print as PDF;
      Labels CSV is one row per shown cable (the Cables tab filter applies).
    · Ports: vlan is the access (untagged) VLAN, vlans the tagged ones of a trunk.
      A net cable between two different access VLANs is warned unless one end
@@ -954,11 +959,17 @@ function parsePorts(text) {
     if (!line) continue;
     const tk = line.split(/\s+/);
     let virtual = false;
-    const rest = tk.slice(1).filter(t => (/^virtual$/i.test(t) ? ((virtual = true), false) : true));
+    let rest = tk.slice(1).filter(t => (/^virtual$/i.test(t) ? ((virtual = true), false) : true)), extra = [];
+    /* after the type, optionally the access VLAN ("-" = none) and "+tagged,tagged":
+       p[1-19] rj45 DEFAULT · p2 rj45 DEFAULT +V20,V21 · eth0.20 iface V20 */
+    if (rest.length > 1 && !kindKey(rest.join(' ')) && kindKey(rest[0])) { extra = rest.slice(1); rest = rest.slice(0, 1); }
+    let vlan = null, vlans = null;
+    for (const t of extra) { if (t[0] === '+') vlans = (vlans || []).concat(t.slice(1).split(',').map(x => x.trim()).filter(Boolean)); else if (vlan == null) vlan = t === '-' ? '' : t; }
     for (const name of expandRange(tk[0])) {
       if (seen.has(name)) continue;
       seen.add(name);
       const raw2 = rest.join(' ') || 'other', key = kindKey(raw2), p = { name, kind: key || raw2 };
+      if (extra.length) { p.vlanSet = true; p.vlan = vlan || ''; p.vlans = vlans || []; }
       if (!key) p.unknown = true;                               // not in the catalog: the wizard refuses to save it
       if (virtual || (key && CAT.portTypes[key].virtual)) p.virtual = true;
       out.push(p);
@@ -967,16 +978,17 @@ function parsePorts(text) {
   return out;
 }
 /* Inverse of parsePorts: groups consecutive series (p1..p24 → p[1-24]). */
-function portsToText(ports) {
+function portsToText(ports, withVlans) {
   const lines = [], vt = (kind, v) => (v && !(portType(kind) || {}).virtual ? ' virtual' : '');
+  const vx = p => { if (!withVlans || !isNetKind(p.kind)) return ''; const tg = (p.vlans || []).filter(Boolean); return (p.vlan ? ' ' + p.vlan : '') + (tg.length ? ' +' + tg.join(',') : ''); };      // VLANs, in the wizard only
   let run = null;
-  const flush = () => { if (run) lines.push((run.n > 1 ? `${run.pre}[${run.first}-${run.last}]${run.suf}` : run.pre + run.first + run.suf) + ' ' + run.kind + vt(run.kind, run.virtual)); run = null; };
+  const flush = () => { if (run) lines.push((run.n > 1 ? `${run.pre}[${run.first}-${run.last}]${run.suf}` : run.pre + run.first + run.suf) + ' ' + run.kind + vt(run.kind, run.virtual) + run.vx); run = null; };
   for (const p of ports) {
-    const m = /^(.*?)(\d+)(\D*)$/.exec(p.name), v = !!p.virtual;
-    if (m && run && run.pre === m[1] && run.suf === m[3] && run.kind === p.kind && run.virtual === v && (run.w ? pad(run.num + 1, run.w) : String(run.num + 1)) === m[2]) { run.num++; run.last = m[2]; run.n++; continue; }
+    const m = /^(.*?)(\d+)(\D*)$/.exec(p.name), v = !!p.virtual, x = vx(p);
+    if (m && run && run.pre === m[1] && run.suf === m[3] && run.kind === p.kind && run.virtual === v && run.vx === x && (run.w ? pad(run.num + 1, run.w) : String(run.num + 1)) === m[2]) { run.num++; run.last = m[2]; run.n++; continue; }
     flush();
-    if (m) run = { pre: m[1], suf: m[3], first: m[2], last: m[2], num: +m[2], n: 1, w: m[2].length > 1 && m[2][0] === '0' ? m[2].length : 0, kind: p.kind, virtual: v };
-    else lines.push(p.name + ' ' + p.kind + vt(p.kind, v));
+    if (m) run = { pre: m[1], suf: m[3], first: m[2], last: m[2], num: +m[2], n: 1, w: m[2].length > 1 && m[2][0] === '0' ? m[2].length : 0, kind: p.kind, virtual: v, vx: x };
+    else lines.push(p.name + ' ' + p.kind + vt(p.kind, v) + x);
   }
   flush();
   return lines.join('\n');
@@ -1706,13 +1718,13 @@ function mapSvg(o) {
   for (const k of L.links) {
     const hl = (UI.sel && k.devs.includes(UI.sel)) || (UI.selLink && k.id === UI.selLink);
     const dim = hits && !hits.has(k.devs[0]) && !hits.has(k.devs[1]);
-    out.push(`<g class="lk ln-${k.type}${k.far ? ' far' : ''}${hl ? ' hl' : ''}${dim ? ' dim' : ''}" data-act="cable" data-id="${esc(k.id)}"><path class="v" d="${k.d}"/><path class="hit" d="${k.d}"/></g>`);
+    out.push(`<g class="lk ln-${k.type}${k.far ? ' far' : ''}${hl ? ' hl' : ''}${dim ? ' dim' : ''}" data-act="cable" data-id="${esc(k.id)}" data-d="${esc(k.devs.join('|'))}">${o.style ? `<title>${esc(k.id + ': ' + k.a + ' ↔ ' + k.b)}</title>` : ''}<path class="v" d="${k.d}"/><path class="hit" d="${k.d}"/></g>`);
     if (hl && k.id) tags.push(k);
   }
   for (const b of L.box.values()) {
     const d = b.d, t0 = d.types[0], ip = firstIp(d), iss = IX.issueDev.get(b.n);
     const cls = ['dev', b.col === 0 || b.col === 4 ? 'infra' : '', b.col === 3 ? 'pass' : '', UI.sel === b.n ? 'sel' : '', hits ? (hits.has(b.n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
-    out.push(`<g class="${cls}" data-act="dev" data-dev="${esc(b.n)}" data-col="${b.col}" data-map="1" transform="translate(${b.x} ${b.y})"><rect class="bx" width="${M.W}" height="${b.h}" rx="5"/>`);
+    out.push(`<g class="${cls}" data-act="dev" data-dev="${esc(b.n)}" data-col="${b.col}" data-map="1" transform="translate(${b.x} ${b.y})">${o.style ? `<title>${esc(b.n + ' · ' + d.types.map(typeLabel).join(', ') + (ip ? ' · ' + ip : ''))}</title>` : ''}<rect class="bx" width="${M.W}" height="${b.h}" rx="5"/>`);
     out.push(`<text class="nm" x="7" y="13">${esc(trunc(b.n, 19))}</text><text class="sb" x="7" y="24">${esc(trunc(((TYPES[t0] && TYPES[t0].tag) || t0) + (ip ? ' · ' + ip : ''), 26))}</text>`);
     if (iss) out.push(`<circle class="i-${iss}" cx="${M.W - 9}" cy="9" r="4"/>`);
     if (b.rowList.length) out.push(`<line class="sep" x1="0" x2="${M.W}" y1="${M.HEAD - 1}" y2="${M.HEAD - 1}"/>`);
@@ -1725,6 +1737,7 @@ function mapSvg(o) {
     }
     out.push('</g>');
   }
+  if (o.style) out.push(svgScript(SVG_JS_PHYS, null));                // exported: tap to highlight, also inside the HTML report
   for (const t of placeTags(tags, [...L.box.values()])) out.push(`<g class="ltag${t.k.l.labeled ? '' : ' nolab'}" data-act="cable" data-id="${esc(t.k.id)}"><rect x="${t.x - t.w / 2}" y="${t.y - 7}" width="${t.w}" height="13" rx="2"/><text x="${t.x}" y="${t.y + 3}" text-anchor="middle">${esc(t.k.id)}</text></g>`);
   out.push('</svg>');
   return { svg: out.join(''), L };
@@ -1850,7 +1863,7 @@ function vlanSvg(o) {
   for (const c of L.cols) for (const sp of c.seps || []) out.push(`<rect class="bg" x="${L.busX(c.i) - 5}" y="${sp.y - 4}" width="10" height="20"/>` + t(L.busX(c.i) + 10, sp.y + 10, 'vs vwarn', tr(sp.label, 34)));
   for (const m of L.multi) {                                         // across columns
     const a = m.cs[0], z = m.cs[m.cs.length - 1], x0 = L.colX(a) + 18, x1 = L.colX(z) + M.CW;
-    out.push(`<g class="${dc(m.n)}" data-act="dev" data-dev="${esc(m.n)}" data-map="1"><rect class="vb" x="${x0}" y="${m.y}" width="${x1 - x0}" height="${M.ROW}" rx="5"/>`);
+    out.push(`<g class="${dc(m.n)}" data-act="dev" data-dev="${esc(m.n)}" data-map="1">${o.style ? `<title>${esc(m.n)}</title>` : ''}<rect class="vb" x="${x0}" y="${m.y}" width="${x1 - x0}" height="${M.ROW}" rx="5"/>`);
     out.push(t(x0 + 7, m.y + 13, 'vn', tr(m.n, 24)));
     for (const i of m.cs) {
       const ms = m.mp.get(L.cols[i].vn), bx = L.busX(i), col = L.cols[i].color;
@@ -1871,8 +1884,28 @@ function vlanSvg(o) {
     out.push(t(x + 7, o.y + 26, 'vl', tr(lab(m) + (o.ms.length > 1 ? ' +' + (o.ms.length - 1) : ''), 32)) + t(x + 7, o.y + 38, 'vs', tr(where, 34)));
     out.push('</g>');
   }
+  if (o.style) {                                                    // exported: tap a device to see what it reaches, as on the page
+    const data = {};
+    for (const n of L.byDev.keys()) {
+      const r = reachOf(n), heads = f => L.cols.filter(c => (c.vns || [c.vn]).some(f)).map(c => c.vn);
+      data[n] = [heads(w => r.byVlan.has(w)), heads(w => r.routed.some(x => x.vlan === w)), [...r.direct], [...r.routedDevs], n + ' · ' + reachText(n)];
+    }
+    out.push(`<text class="vs vseltxt" x="${L.W - 8}" y="11" text-anchor="end"></text>`, svgScript(SVG_JS_VLAN, data));
+  }
   out.push('</svg>');
   return { svg: out.join(''), L };
+}
+/* Scripts carried by the exported SVG files (they run when the file is opened in a
+   browser, and inside the HTML report). Plain ES5, no access to anything outside the SVG. */
+const SVG_JS_PHYS = "var cur=null;svg.addEventListener('click',function(e){var g=e.target.closest('[data-dev],[data-id]'),dv=g&&g.getAttribute('data-dev'),id=g&&!dv&&g.getAttribute('data-id'),k=dv?'d'+dv:id?'l'+id:null;if(k===cur)k=null;cur=k;svg.classList.toggle('has-sel',!!k);" +
+  "[].forEach.call(svg.querySelectorAll('.dev'),function(b){b.classList.toggle('sel',!!k&&!!dv&&b.getAttribute('data-dev')===dv);});" +
+  "[].forEach.call(svg.querySelectorAll('.lk'),function(l){var d=(l.getAttribute('data-d')||'').split('|');l.classList.toggle('hl',!!k&&(dv?d.indexOf(dv)>=0:l.getAttribute('data-id')===id));});});";
+const SVG_JS_VLAN = "var cur=null,t=svg.querySelector('.vseltxt');svg.addEventListener('click',function(e){var g=e.target.closest('[data-dev]'),n=g&&g.getAttribute('data-dev');if(n===cur)n=null;cur=n;var r=n&&D[n];svg.classList.toggle('has-sel',!!r);if(t)t.textContent=r?r[4]:'';" +
+  "[].forEach.call(svg.querySelectorAll('.vdev'),function(b){var x=b.getAttribute('data-dev');b.classList.toggle('sel',!!r&&x===n);b.classList.toggle('reach',!!r&&r[2].indexOf(x)>=0);b.classList.toggle('routed',!!r&&r[3].indexOf(x)>=0);});" +
+  "[].forEach.call(svg.querySelectorAll('.vhead'),function(h){var v=h.getAttribute('data-v');h.classList.toggle('von',!!r&&r[0].indexOf(v)>=0);h.classList.toggle('vrt',!!r&&r[1].indexOf(v)>=0);h.classList.toggle('voff',!!r&&r[0].indexOf(v)<0&&r[1].indexOf(v)<0);});});";
+function svgScript(js, data) {
+  const body = '(function(){var s=document.currentScript,svg=s&&s.closest?s.closest("svg"):document.querySelector("svg");if(!svg)return;' + (data ? 'var D=' + JSON.stringify(data) + ';' : '') + js + '})();';
+  return '<script><![CDATA[' + body.replace(/]]>/g, ']]\\u003e') + ']]></script>';
 }
 /* The whole map (every layer, no filter, no selection) as a standalone SVG file, with
    the page's map styles embedded and resolved to the light theme. */
@@ -2287,12 +2320,16 @@ function wizDevice(o) {
     edit: cur ? o.edit : null, tpl: '', pattern: cur ? o.edit : src ? patternFrom(o.dup) : 'device-{nn}', qty: 1, addType: CAT.portTypes.rj45 ? 'rj45' : catKeys()[0] || '', addQty: 1,
     f: { types: src ? src.types.slice() : ['other'], model: src ? src.model : '', serial: cur ? cur.serial : '', project: src ? src.project : UI.project || '', owner: src ? src.owner : '',
       location: src ? src.location : '', notes: src ? src.notes : '', admin: src ? src.admin : '', expectedPower: src ? src.expectedPower : 'none' },
-    portsText: src ? portsToText(src.ports) : '', meta: {}, open: new Set()
+    portsText: src ? portsToText(src.ports, true) : '', meta: {}, open: new Set()
   };
   if (src) for (const p of src.ports) w.meta[p.name] = { vlan: p.vlan || '', vlans: (p.vlans || []).join(', '), ip: cur ? p.ip || '' : '', mac: cur ? p.mac || '' : '', services: p.services || '', notes: p.notes || '' };
   const qty = () => Math.max(1, Math.min(50, +w.qty || 1));
   const names = () => genNames(w.pattern, qty());
   const metaOf = n => w.meta[n] || (w.meta[n] = { vlan: '', vlans: '', ip: '', mac: '', services: '', notes: '' });
+  /* the text says the VLANs of every network port: what it says goes to the port fields, and
+     a VLAN chosen in a port field is written back into the text */
+  const textToMeta = () => { for (const p of parsePorts(w.portsText)) if (isNetKind(p.kind)) { const m = metaOf(p.name); m.vlan = p.vlanSet ? p.vlan : ''; m.vlans = p.vlanSet ? p.vlans.join(', ') : ''; } };
+  const metaToText = () => { w.portsText = portsToText(parsePorts(w.portsText).map(p => { const m = metaOf(p.name); return { name: p.name, kind: p.kind, virtual: p.virtual && !(portType(p.kind) || {}).virtual, vlan: m.vlan, vlans: String(m.vlans || '').split(/[\s,]+/).filter(Boolean) }; }), true); };
   const prevHtml = () => {
     if (w.edit) return '';
     const nm = names();
@@ -2301,6 +2338,8 @@ function wizDevice(o) {
   const portsHtml = () => {
     const ports = parsePorts(w.portsText), vl = Object.keys(S.vlans).sort(natCmp), bad = [...new Set(ports.filter(p => p.unknown).map(p => p.kind))];
     let h = bad.length ? `<div class="iss err"><b>Error</b><span>Type not in the catalog: ${esc(bad.join(', '))}</span></div>` : '';
+    const nov = [...new Set([].concat(...ports.filter(p => isNetKind(p.kind)).map(p => { const m = metaOf(p.name); return [m.vlan].concat(String(m.vlans || '').split(/[\s,]+/)); })).filter(v => v && !S.vlans[v]))];
+    if (nov.length) h += `<div class="iss warn"><b>Warning</b><span>VLAN not defined yet: ${esc(nov.join(', '))} (IPs tab, + VLAN)</span></div>`;
     h += `<p class="lbl">${plural(ports.length, 'port')}</p>`;
     for (const p of ports) {
       const m = metaOf(p.name), key = 'meta|' + p.name + '|', net = isNetKind(p.kind);
@@ -2386,17 +2425,27 @@ function wizDevice(o) {
       h += fld('Admin page', inp('f|admin', w.f.admin, 'placeholder="http://{ip}"')) + fld('Notes', inp('f|notes', w.f.notes));
       h += '<h3>Ports</h3><div class="row">' + `<select class="grow" data-f="addType" aria-label="Port type">${catKeys().map(k => opt(k, k + ' · ' + CAT.portTypes[k].label, w.addType)).join('')}</select>` +
         `<input type="number" inputmode="numeric" min="1" max="96" data-f="addQty" value="${esc(w.addQty)}" style="width:76px" aria-label="How many"><button class="btn sm pri" data-act="w-add">Add</button></div>`;
-      h += fld('One per line: name type. Range: eth[0-3] rj45', `<textarea data-f="portsText" data-re rows="6" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="eth0 rj45&#10;uart0 uart&#10;dc-in dc-in">${esc(w.portsText)}</textarea>`);
+      h += fld('One per line: name type [VLAN] [+tagged,…]. Range: eth[0-3] rj45 LAB', `<textarea data-f="portsText" data-re rows="6" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="eth0 rj45&#10;uart0 uart&#10;dc-in dc-in">${esc(w.portsText)}</textarea>`);
       return h + `<div id="w-ports">${portsHtml()}</div>`;
     },
     foot: () => `<button class="btn" data-act="dlg-back">Cancel</button><button class="btn pri" data-act="save">${w.edit ? 'Save' : 'Create'}</button>`,
-    set(f, v) { const p = f.split('|'); if (p[0] === 'meta') metaOf(p[1])[p[2]] = v; else if (p[0] === 'f') w.f[p[1]] = v; else w[f] = v; },
+    set(f, v) {
+      const p = f.split('|');
+      if (p[0] === 'meta') {
+        metaOf(p[1])[p[2]] = v;
+        if (p[2] === 'vlan' || p[2] === 'vlans') { metaToText(); const ta = $('#dlg-b textarea[data-f="portsText"]'); if (ta) ta.value = w.portsText; }      // the text on screen follows at once
+      }
+      else if (p[0] === 'f') w.f[p[1]] = v;
+      else { w[f] = v; if (f === 'portsText') textToMeta(); }
+    },
     fix(f) {
       if (f !== 'tpl') return;
       const t = CAT.templates[w.tpl];
       if (!t) return;
       w.f.types = t.types.slice(); w.pattern = t.pattern; w.portsText = t.ports.join('\n'); w.f.expectedPower = t.power; w.f.admin = t.admin || ''; w.f.model = t.model || ''; w.f.notes = t.notes || ''; w.meta = {}; w.open.clear();
       for (const pn of Object.keys(t.meta || {})) w.meta[pn] = Object.assign({ vlan: '', vlans: '', ip: '', mac: '', services: '', notes: '' }, t.meta[pn]);
+      for (const ln of t.ports) for (const q of parsePorts(ln)) if (q.vlanSet) Object.assign(metaOf(q.name), { vlan: q.vlan, vlans: q.vlans.join(', ') });      // a template line may carry VLANs too
+      metaToText();
     },
     partial() { const a = $('#w-prev'), b = $('#w-ports'); if (a) a.innerHTML = prevHtml(); if (b) b.innerHTML = portsHtml(); },
     on: {

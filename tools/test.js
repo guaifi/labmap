@@ -591,6 +591,54 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(trunkJoin.length === 1 && /untagged VLAN IT-NET on it-sw:p7, DEFAULT on sw-desk:p1 on a trunk: they become one network/.test(trunkJoin[0]), 'on a trunk the same mismatch is warned (native VLANs that differ are usually a mistake)', trunkJoin.join(' | '));
   ok(errors.length === 0, 'no console errors', errors.join(' | '));
 
+
+  console.log('7g. VLANs in the ports text; highlighting in the exported SVG and report');
+  const pt = await page.evaluate(() => {
+    const ps = LAB.parsePorts('p[1-3] rj45 DEFAULT\np4 rj45 DEFAULT +V20,V21\np5 rj45 +V20\neth0.20 iface V20\nx something odd\np6 rj45 -');
+    const s = p => p.name + '=' + (p.vlanSet ? (p.vlan || '·') + '/' + p.vlans.join('+') : 'none') + ':' + p.kind;
+    return { parsed: ps.map(s).join(' '), back: LAB.portsToText(ps.filter(p => p.kind !== 'something odd').map(p => ({ name: p.name, kind: p.kind, virtual: p.virtual && p.kind !== 'iface', vlan: p.vlan, vlans: p.vlans })), true) };
+  });
+  ok(pt.parsed === 'p1=DEFAULT/:rj45 p2=DEFAULT/:rj45 p3=DEFAULT/:rj45 p4=DEFAULT/V20+V21:rj45 p5=·/V20:rj45 eth0.20=V20/:iface x=none:something odd p6=·/:rj45', 'ports text: "p[1-3] rj45 DEFAULT", "+V20,V21" for tagged, "-" for none; multi-word types still read', pt.parsed);
+  ok(pt.back === 'p[1-3] rj45 DEFAULT\np4 rj45 DEFAULT +V20,V21\np5 rj45 +V20\neth0.20 iface V20\np6 rj45', 'and written back grouped by type and VLAN', JSON.stringify(pt.back));
+  await quiet(page);
+  if (!(await page.evaluate(() => LAB.net.editing))) { await page.click('#b-edit'); await page.waitForFunction(() => LAB.net.editing); }
+  await page.evaluate(() => LAB.setTab('devices'));
+  await page.fill('#dq', 'sw-desk');
+  await page.waitForFunction(() => document.querySelectorAll('#dev-list .item').length === 1 && document.querySelector('#dev-list .item').dataset.dev === 'sw-desk');
+  await page.click('#dev-list .item');
+  await page.click('#dlg-f [data-act="edit"]');
+  const ptx0 = await page.inputValue('#dlg-b textarea[data-f="portsText"]');
+  await page.click('#w-ports [data-p="p5"]');
+  await page.selectOption('#dlg-b select[data-f="meta|p5|vlan"]', 'V21');
+  const ptx1 = await page.inputValue('#dlg-b textarea[data-f="portsText"]');
+  await page.fill('#dlg-b textarea[data-f="portsText"]', 'p[1-19] rj45 V22\np[20-22] rj45 DEFAULT +V20');
+  await page.click('#dlg-f [data-act="save"]');
+  const saved = await page.evaluate(() => LAB.state.devices['sw-desk'].ports.map(p => p.name + '=' + (p.vlan || '') + '/' + (p.vlans || []).join('+')));
+  ok(/^p1 rj45 DEFAULT \+V20\np2 rj45 DEFAULT \+V20,V21,V22\np\[3-19\] rj45 DEFAULT\np20 rj45 V20/.test(ptx0), 'editing a switch, its ports text shows the VLANs', JSON.stringify(ptx0.slice(0, 90)));
+  ok(/\np\[3-4\] rj45 DEFAULT\np5 rj45 V21\np\[6-19\] rj45 DEFAULT/.test(ptx1), 'a VLAN chosen for one port is written into the text at once');
+  ok(saved[0] === 'p1=V22/' && saved[18] === 'p19=V22/' && saved[19] === 'p20=DEFAULT/V20' && saved[21] === 'p22=DEFAULT/V20' && saved[1] === 'p2=V22/', 'typing "p[1-19] rj45 V22" sets 19 ports at once (and clears the tagged ones that are no longer written)', saved.slice(0, 3).join(' '));
+  await page.click('[data-act="dlg-close"]').catch(() => {});
+  await page.fill('#dq', '');
+  const files = await page.evaluate(() => ({ map: LAB.exportMapSvg(), vlan: LAB.exportVlanSvg(), rep: LAB.reportHtml() }));
+  const xdir = fs.mkdtempSync(path.join(os.tmpdir(), 'labmap-x-'));
+  for (const [f, t] of [['map.svg', files.map], ['vlan.svg', files.vlan], ['report.html', files.rep]]) fs.writeFileSync(path.join(xdir, f), t);
+  const xp = await browser.newPage();
+  xp.on('pageerror', e => errors.push('export: ' + e.message));
+  await xp.goto('file://' + path.join(xdir, 'map.svg'));
+  await xp.click('g.dev[data-dev="sw-desk"]');
+  const xm = await xp.evaluate(() => ({ hl: document.querySelectorAll('.lk.hl').length, sel: document.querySelectorAll('.dev.sel').length }));
+  await xp.goto('file://' + path.join(xdir, 'vlan.svg'));
+  await xp.click('g.vdev[data-dev="dev5"]');
+  const xv = await xp.evaluate(() => document.querySelector('.vseltxt').textContent);
+  await xp.goto('file://' + path.join(xdir, 'report.html'));
+  await xp.click('svg.vmap g.vdev[data-dev="pi"]');
+  const xr = await xp.evaluate(() => ({ t: document.querySelector('svg.vmap .vseltxt').textContent, reach: document.querySelectorAll('svg.vmap .vdev.reach').length }));
+  await xp.close();
+  fs.rmSync(xdir, { recursive: true, force: true });
+  ok(xm.hl === 4 && xm.sel === 1, 'exported map SVG: tapping a device highlights its cables, also opened on its own', JSON.stringify(xm));
+  ok(/^dev5 · .*sees 3 devices/.test(xv) && /^pi · /.test(xr.t) && xr.reach >= 3, 'exported VLAN map and HTML report: tapping a device shows what it reaches', xv + ' | ' + xr.t);
+  ok(errors.length === 0, 'no console errors', errors.join(' | '));
+
   console.log('8. Desktop, dark theme; home network, example button and load at scale 4');
   const desk = await open(base + '/index.html#ips', { viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
   await loadExample(desk);

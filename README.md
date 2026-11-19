@@ -14,7 +14,8 @@ server, plain YAML files. Nothing to install besides Python 3.7+.
 - **Checks that never block**: duplicate IP or MAC, wrong port types, missing power,
   VLANs that do not match on both ends of a trunk.
 - **Several sites** on one server, sharing a catalog of device templates.
-- Edit lock, change log, undo, automatic backups, exports (SVG, HTML report, CSV).
+- Edit lock, change log, undo, automatic backups, exports (SVG, HTML report, CSV). In the
+  exported SVG and report, tapping a device still highlights its cables or its reach.
 
 No passwords and no HTTPS: for a trusted internal network only.
 
@@ -149,7 +150,10 @@ or move its folder in `sites/`.
 ## Concepts
 
 - **Device**: a name (its label and hostname, any pattern), types and **ports**; each
-  port has a type from the catalog (`rj45`, `usb`, `ac-in`...).
+  port has a type from the catalog (`rj45`, `usb`, `ac-in`...). In the ports text one
+  line can set many ports and their VLAN: `p[1-19] rj45 DEFAULT`, a trunk
+  `p2 rj45 DEFAULT +V20,V21`, a sub-interface `eth0.20 iface V20`. A device plugged into
+  a switch access port needs no VLAN of its own: the map takes it from the switch.
 - **Cable**: joins two ports and has an id (`N-001` network, `P-001` power...). Tick
   **Physical label** only for cables that carry it on a label. For power, the outlet
   goes first.
