@@ -47,7 +47,7 @@
      catalog  { portTypes: { KEY: { label, layer, name, first?, dir?, net?, virtual?, pass?, alias:[..] } },
                 templates: { KEY: { label, types:[..], model, pattern, power, admin, notes, ports:["name type", ..],
                                     meta?: { PORT: { vlan?, services?, notes? } } } } }
-     vlans    { NAME: { id, subnet:"10.20.10.0/24", gateway, dns, scope:"it"|"local", notes } }
+     vlans    { NAME: { id, subnet:"10.20.10.0/24", gateway, dns, dhcp?:"a-b, c-d", scope:"it"|"local", notes } }
      devices  { NAME: { types:[..], model, serial, project, owner, location, notes,
                 admin:"http://{ip}", expectedPower:"pdu"|"dc"|"ups"|"wall"|"none",
                 ports:[ { name, kind, virtual?, ip?, mac?, vlan?, vlans?:[..], services?, notes? } ] } }
@@ -143,6 +143,9 @@
      Cables that jump three or more columns are drawn faint until selected.
      Cable id tags (selected cables only) are tried along the curve and put
      where they cover no other tag or box (placeTags).
+   · Device sheet "Connect" (connectHtml): admin page, each address with its VLAN,
+     switch port and services turned into links or commands to copy
+     (serviceActions), and where its serial console and JTAG end up.
    · Map taps: the first tap on a device or cable highlights it (selection bar
      with Open); a second tap, or Open, opens its sheet. In edit mode every
      physical port of a visible layer is on its box (free ones hollow): tap a
@@ -466,7 +469,7 @@ function computeStats() {
    --------------------------------------------------------------------------- */
 function buildIpIndex() {
   const per = {};
-  const mk = (name, v) => ({ name, v: v || null, cidr: v ? parseCidr(v.subnet) : null, gw: v ? ipToInt(v.gateway) : null, fixed: new Map(), uses: [] });
+  const mk = (name, v) => ({ name, v: v || null, cidr: v ? parseCidr(v.subnet) : null, gw: v ? ipToInt(v.gateway) : null, dhcp: v ? dhcpRanges(v.dhcp) : [], fixed: new Map(), uses: [] });
   for (const vn of Object.keys(S.vlans)) per[vn] = mk(vn, S.vlans[vn]);
   per[''] = mk('', null);                       // ports with an IP and no known VLAN
   for (const [ref, P] of IX.ports) {
@@ -488,17 +491,33 @@ function buildIpIndex() {
   });
   return per;
 }
-/* State of an address: free | fixed (on a port) | noted (ipUse or gateway) | conf (conflict). */
+/* DHCP ranges of a VLAN: "10.20.10.200-10.20.10.249, 10.20.10.10-20" (the end may be
+   just the last number). Returns [{ from, to }] as integers. */
+function dhcpRanges(text) {
+  const out = [];
+  for (const part of String(text || '').split(/[,;\s]+/).filter(Boolean)) {
+    const [a, b] = part.split('-'), from = ipToInt(a);
+    if (from == null) continue;
+    let to = b == null || b === '' ? from : /^\d+$/.test(b) ? (from & ~255) + +b : ipToInt(b);
+    if (to == null || to < from) to = from;
+    out.push({ from, to });
+  }
+  return out;
+}
+/* State of an address: free | fixed (on a port) | noted (ipUse or gateway) | dhcp (in a
+   DHCP range) | conf (conflict). An address on a port wins over the DHCP range. */
 function ipInfo(vn, n) {
   const V = IX.ip[vn];
   const fixed = (V && V.fixed.get(n)) || [];
   const uses = V ? V.uses.filter(u => n >= u.from && n <= u.to) : [];
   const gw = !!(V && V.gw != null && V.gw === n);
+  const dhcp = !!(V && V.dhcp.some(r => n >= r.from && n <= r.to));
   let state = 'free';
   if (fixed.length > 1 || uses.length > 1 || (fixed.length && uses.some(u => u.e.iface && !fixed.includes(u.e.iface)))) state = 'conf';
   else if (fixed.length) state = 'fixed';
   else if (uses.length || gw) state = 'noted';
-  return { fixed, uses, state, gw };
+  else if (dhcp) state = 'dhcp';
+  return { fixed, uses, state, gw, dhcp };
 }
 /* First free IP after "after"; wraps around at the end of the subnet. */
 function freeIp(vn, after, skip) {
@@ -1043,7 +1062,7 @@ function toYaml(st, noDate) {
   L.push('# Labmap ' + VERSION + (noDate ? '' : ' · exported ' + new Date().toISOString()) + ' · rev ' + st.rev);
   L.push('rev: ' + st.rev, 'format: ' + FORMAT);
   L.push('vlans:');
-  for (const v of Object.keys(st.vlans).sort(natCmp)) L.push('  ' + yamlStr(v) + ': ' + yamlFlow(st.vlans[v], ['id', 'subnet', 'gateway', 'dns', 'scope', 'notes']));
+  for (const v of Object.keys(st.vlans).sort(natCmp)) L.push('  ' + yamlStr(v) + ': ' + yamlFlow(st.vlans[v], ['id', 'subnet', 'gateway', 'dns', 'dhcp', 'scope', 'notes']));
   L.push('devices:');
   for (const n of Object.keys(st.devices).sort(natCmp)) {
     const d = st.devices[n];
@@ -1404,7 +1423,7 @@ function undo() { if (!UNDO) return; const u = UNDO; if (replaceState(normalize(
 /* ---------------------------------------------------------------------------
    13. UI state (the only thing that does not live in S) and shared pieces
    --------------------------------------------------------------------------- */
-const MAP = { W: 140, HEAD: 30, ROW: 13, GAPY: 9, BAND: 22, COLGAP: 88, PADX: 70, TOP: 20 };
+const MAP = { W: 164, HEAD: 36, ROW: 15, GAPY: 10, BAND: 24, COLGAP: 72, PADX: 48, TOP: 24 };
 const UI = { view: 'phys', pend: null, tab: 'map', layers: {}, project: '', q: '', fit: false, zoom: 1, sel: null, selLink: null, vlan: '', ipBlock: null, dq: '', dtype: '', cq: '', clayer: '', logN: 40, lastWho: '', center: null, user: '' };
 for (const k of LAYER_KEYS) UI.layers[k] = true;
 let LAYOUT = null;      // last map layout (to centre on a device)
@@ -1677,12 +1696,12 @@ function layout(gap) {
    where they do not cover another tag or a device box; if every spot is taken, the
    least covered one. */
 function placeTags(tags, boxes) {
-  const T = [0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78, 0.15, 0.85], H = 13, out = [], taken = [];
+  const T = [0.5, 0.4, 0.6, 0.3, 0.7, 0.22, 0.78, 0.15, 0.85], H = 16, out = [], taken = [];
   for (const b of boxes || []) taken.push([b.x, b.y, b.x + MAP.W, b.y + b.h]);
   const at = (z, t) => { const u = 1 - t; return [u * u * u * z[0] + 3 * u * u * t * z[2] + 3 * u * t * t * z[4] + t * t * t * z[6], u * u * u * z[1] + 3 * u * u * t * z[3] + 3 * u * t * t * z[5] + t * t * t * z[7]]; };
   const cover = r => taken.reduce((s, q) => s + Math.max(0, Math.min(r[2], q[2]) - Math.max(r[0], q[0])) * Math.max(0, Math.min(r[3], q[3]) - Math.max(r[1], q[1])), 0);
   for (const k of tags.slice().sort((p, q) => Math.abs(p.bz[6] - p.bz[0]) - Math.abs(q.bz[6] - q.bz[0]))) {      // short cables first: they have fewer spots
-    const w = k.id.length * 5.4 + 8;
+    const w = k.id.length * 6.4 + 10;
     let best = null;
     for (const t of T) {
       const [x, y] = at(k.bz, t), r = [x - w / 2 - 1, y - H / 2 - 1, x + w / 2 + 1, y + H / 2 + 1], c = cover(r);
@@ -1712,7 +1731,7 @@ function mapSvg(o) {
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" class="map${selOn ? ' has-sel' : ''}" viewBox="0 0 ${L.W} ${L.H}" ${o.scale ? `width="${Math.round(L.W * o.scale)}" height="${Math.round(L.H * o.scale)}"` : 'width="100%"'} data-act="map-bg" role="img" aria-label="Map of devices and cables">`);
   if (o.style) out.push('<style>' + o.style.replace(/</g, '&lt;') + '</style>');
   out.push(`<rect class="bg" width="${L.W}" height="${L.H}"/>`);
-  MAP_COLS.forEach((t, i) => out.push(`<text class="cap" x="${L.colX(i)}" y="12">${t}</text>`));
+  MAP_COLS.forEach((t, i) => out.push(`<rect class="colbg cb-${i}" x="${L.colX(i) - 12}" y="0" width="${M.W + 24}" height="${L.H}" rx="8"/><text class="cap" x="${L.colX(i)}" y="15">${t}</text>`));      // one faint band per column
   for (const b of L.bands) out.push(`<rect class="band" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="6"/><text class="bandt" x="${b.x + 8}" y="${b.y + 15}">${esc(trunc(b.g || 'No project', 20))}</text>`);
   const tags = [];
   for (const k of L.links) {
@@ -1725,20 +1744,20 @@ function mapSvg(o) {
     const d = b.d, t0 = d.types[0], ip = firstIp(d), iss = IX.issueDev.get(b.n);
     const cls = ['dev', b.col === 0 || b.col === 4 ? 'infra' : '', b.col === 3 ? 'pass' : '', UI.sel === b.n ? 'sel' : '', hits ? (hits.has(b.n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
     out.push(`<g class="${cls}" data-act="dev" data-dev="${esc(b.n)}" data-col="${b.col}" data-map="1" transform="translate(${b.x} ${b.y})">${o.style ? `<title>${esc(b.n + ' · ' + d.types.map(typeLabel).join(', ') + (ip ? ' · ' + ip : ''))}</title>` : ''}<rect class="bx" width="${M.W}" height="${b.h}" rx="5"/>`);
-    out.push(`<text class="nm" x="7" y="13">${esc(trunc(b.n, 19))}</text><text class="sb" x="7" y="24">${esc(trunc(((TYPES[t0] && TYPES[t0].tag) || t0) + (ip ? ' · ' + ip : ''), 26))}</text>`);
+    out.push(`<rect class="rb cb-${b.col}" width="${M.W}" height="4" rx="2"/><text class="nm" x="8" y="17">${esc(trunc(b.n, 20))}</text><text class="sb" x="8" y="30">${esc(trunc(((TYPES[t0] && TYPES[t0].tag) || t0) + (ip ? ' · ' + ip : ''), 27))}</text>`);
     if (iss) out.push(`<circle class="i-${iss}" cx="${M.W - 9}" cy="9" r="4"/>`);
     if (b.rowList.length) out.push(`<line class="sep" x1="0" x2="${M.W}" y1="${M.HEAD - 1}" y2="${M.HEAD - 1}"/>`);
     for (const r of b.rowList) {
       const right = r.side > 0, ry = r.y - b.y, ref = b.n + ':' + r.pn, lay = r.links.length ? r.links[0].type : layerOf(r.kind);
       const pc = UI.pend ? (UI.pend === ref ? ' pend' : pendOk(UI.pend, ref) ? ' can' : ' cant') : '';
       const dot = r.links.length ? `<circle class="pf-${lay}" cx="${right ? M.W : 0}" cy="${ry}" r="2.6"/>` : `<circle class="free ps-${lay}" cx="${right ? M.W : 0}" cy="${ry}" r="2.8"/>`;
-      const row = `<text class="pt${IX.ports.has(ref) ? '' : ' bad'}${r.links.length ? '' : ' fr'}" x="${right ? M.W - 7 : 7}" y="${ry + 3}" text-anchor="${right ? 'end' : 'start'}">${esc(trunc(r.pn, 18))}</text>` + dot;
+      const row = `<text class="pt${IX.ports.has(ref) ? '' : ' bad'}${r.links.length ? '' : ' fr'}" x="${right ? M.W - 8 : 8}" y="${ry + 3.5}" text-anchor="${right ? 'end' : 'start'}">${esc(trunc(r.pn, 19))}</text>` + dot;
       out.push(NET.editing && IX.ports.has(ref) ? `<g class="prt${pc}" data-act="port" data-ref="${esc(ref)}"><rect class="phit" x="${right ? M.W / 2 : -6}" y="${ry - M.ROW / 2}" width="${M.W / 2 + 6}" height="${M.ROW}"/>${row}</g>` : row);
     }
     out.push('</g>');
   }
   if (o.style) out.push(svgScript(SVG_JS_PHYS, null));                // exported: tap to highlight, also inside the HTML report
-  for (const t of placeTags(tags, [...L.box.values()])) out.push(`<g class="ltag${t.k.l.labeled ? '' : ' nolab'}" data-act="cable" data-id="${esc(t.k.id)}"><rect x="${t.x - t.w / 2}" y="${t.y - 7}" width="${t.w}" height="13" rx="2"/><text x="${t.x}" y="${t.y + 3}" text-anchor="middle">${esc(t.k.id)}</text></g>`);
+  for (const t of placeTags(tags, [...L.box.values()])) out.push(`<g class="ltag${t.k.l.labeled ? '' : ' nolab'}" data-act="cable" data-id="${esc(t.k.id)}"><rect x="${t.x - t.w / 2}" y="${t.y - 8}" width="${t.w}" height="16" rx="2"/><text x="${t.x}" y="${t.y + 3.5}" text-anchor="middle">${esc(t.k.id)}</text></g>`);
   out.push('</svg>');
   return { svg: out.join(''), L };
 }
@@ -1784,7 +1803,7 @@ function renderSelbar(L) {
    hanging from it; a device in several VLANs is a box across their columns, with a
    dot on each VLAN it is in. Derived from IX.l2; nothing here is edited.
    --------------------------------------------------------------------------- */
-const VM = { CW: 200, GAP: 26, PAD: 16, HEAD: 70, BOX: 44, ROW: 36, GAPY: 8 };
+const VM = { CW: 220, GAP: 28, PAD: 18, HEAD: 80, BOX: 52, ROW: 42, GAPY: 9 };
 const VCOL = ['#2f6fdf', '#d9480f', '#2b8a3e', '#ae3ec9', '#0c8599', '#e67700', '#c2255c', '#5c940d', '#1864ab', '#862e9c'];
 function vlanLayout(avail) {
   const M = VM, l2 = IX.l2, vis = n => !UI.project || (S.devices[n].project || '') === UI.project;
@@ -1835,7 +1854,7 @@ function vlanLayout(avail) {
   return { W: Math.max(colX(cols.length) - M.GAP + M.PAD, 320), H, cw, cols, multi, single, box, links: [], colX, busX, byDev };
 }
 function vlanSvg(o) {
-  const L = vlanLayout(o.avail), M = Object.assign({}, VM, { CW: L.cw }), hits = o.hits || null, out = [], k = (L.cw - VM.CW) / 5.4;
+  const L = vlanLayout(o.avail), M = Object.assign({}, VM, { CW: L.cw }), hits = o.hits || null, out = [], k = (L.cw - VM.CW) / 6.2;
   const tr = (s, n) => trunc(s, Math.round(n + k));
   const t = (x, y, cls, txt, extra) => `<text class="${cls}" x="${x}" y="${y}"${extra || ''}>${esc(txt)}</text>`;
   const R = UI.sel && S.devices[UI.sel] ? reachOf(UI.sel) : null;      // what the selected device reaches
@@ -1850,13 +1869,13 @@ function vlanSvg(o) {
     out.push(`<line class="vbus" x1="${L.busX(c.i)}" x2="${L.busX(c.i)}" y1="${M.PAD + M.HEAD - 8}" y2="${L.H - 10}" style="stroke:${c.color}"/>`);
     const vns = c.vns || [c.vn], hc = !R ? '' : vns.some(w => R.byVlan.has(w)) ? ' von' : R.routed.some(r => vns.includes(r.vlan)) ? ' vrt' : ' voff';
     out.push(`<g class="vhead${hc}" ${c.none ? '' : `data-act="vlan-go" data-v="${esc(c.vn)}"`}><rect class="vh" x="${x}" y="${M.PAD}" width="${M.CW}" height="${M.HEAD - 8}" rx="6"/><rect x="${x}" y="${M.PAD}" width="${M.CW}" height="4" rx="2" style="fill:${c.color}"/>`);
-    if (c.none) out.push(t(x + 8, M.PAD + 20, 'vt', 'No VLAN') + t(x + 8, M.PAD + 34, 'vs', 'Cabled, VLAN unknown.') + t(x + 8, M.PAD + 47, 'vs', 'Set it on the switch port.'));
+    if (c.none) out.push(t(x + 8, M.PAD + 22, 'vt', 'No VLAN') + t(x + 8, M.PAD + 38, 'vs', 'Cabled, VLAN unknown.') + t(x + 8, M.PAD + 52, 'vs', 'Set it on the switch port.'));
     else {
       const idt = w => w + (S.vlans[w] && S.vlans[w].id != null && S.vlans[w].id !== '' ? ' · ' + S.vlans[w].id : '');
-      out.push(t(x + 8, M.PAD + 20, 'vt', tr(vns.map(idt).join(' + '), 26)) + t(x + 8, M.PAD + 33, 'vs', tr((v.subnet || 'no subnet') + (v.gateway ? ' · gw ' + v.gateway : ''), 34)));
-      out.push(isl.length > 1 ? t(x + 8, M.PAD + 46, 'vs vwarn', tr('split: ' + isl.map(i => i.join(', ')).join(' | '), 36)) : t(x + 8, M.PAD + 46, 'vs', tr(isl.length ? 'on ' + isl[0].join(', ') : 'on no switch', 36)));
+      out.push(t(x + 8, M.PAD + 22, 'vt', tr(vns.map(idt).join(' + '), 26)) + t(x + 8, M.PAD + 38, 'vs', tr((v.subnet || 'no subnet') + (v.gateway ? ' · gw ' + v.gateway : ''), 34)));
+      out.push(isl.length > 1 ? t(x + 8, M.PAD + 52, 'vs vwarn', tr('split: ' + isl.map(i => i.join(', ')).join(' | '), 36)) : t(x + 8, M.PAD + 52, 'vs', tr(isl.length ? 'on ' + isl[0].join(', ') : 'on no switch', 36)));
       const twin = IX.l2.sameId[c.vn];
-      out.push(t(x + 8, M.PAD + 58, 'vs', tr(plural(c.x.members.length, 'member') + (c.joins && c.joins.length ? ' · joined untagged at ' + [...new Set(c.joins.map(j => j.link))].join(', ') : twin ? ' · id also ' + twin.join(', ') : ''), 36)));
+      out.push(t(x + 8, M.PAD + 66, 'vs', tr(plural(c.x.members.length, 'member') + (c.joins && c.joins.length ? ' · joined untagged at ' + [...new Set(c.joins.map(j => j.link))].join(', ') : twin ? ' · id also ' + twin.join(', ') : ''), 36)));
     }
     out.push('</g>');
   }
@@ -1864,24 +1883,24 @@ function vlanSvg(o) {
   for (const m of L.multi) {                                         // across columns
     const a = m.cs[0], z = m.cs[m.cs.length - 1], x0 = L.colX(a) + 18, x1 = L.colX(z) + M.CW;
     out.push(`<g class="${dc(m.n)}" data-act="dev" data-dev="${esc(m.n)}" data-map="1">${o.style ? `<title>${esc(m.n)}</title>` : ''}<rect class="vb" x="${x0}" y="${m.y}" width="${x1 - x0}" height="${M.ROW}" rx="5"/>`);
-    out.push(t(x0 + 7, m.y + 13, 'vn', tr(m.n, 24)));
+    out.push(t(x0 + 8, m.y + 16, 'vn', tr(m.n, 22)));
     for (const i of m.cs) {
       const ms = m.mp.get(L.cols[i].vn), bx = L.busX(i), col = L.cols[i].color;
-      out.push(i === a ? `<line class="vstub" x1="${bx}" x2="${x0}" y1="${m.y + 18}" y2="${m.y + 18}" style="stroke:${col}"/>` : `<line class="vbus" x1="${bx}" x2="${bx}" y1="${m.y}" y2="${m.y + M.ROW}" style="stroke:${col}"/>`);
-      out.push(`<circle cx="${bx}" cy="${m.y + 18}" r="3.4" style="fill:${col}"/>`);
-      const lx = i === a ? x0 + 7 : bx + 7;
-      out.push(t(lx, m.y + 27, 'vl', tr(lab(ms[0]) + (ms.length > 1 ? ' +' + (ms.length - 1) : ''), 30)));
-      if (badges(ms[0])) out.push(t(i === a ? x1 - 6 : bx + M.CW - 30, m.y + 13, 'vbad', badges(ms[0]).trim(), i === a ? ' text-anchor="end"' : ''));
+      out.push(i === a ? `<line class="vstub" x1="${bx}" x2="${x0}" y1="${m.y + 21}" y2="${m.y + 21}" style="stroke:${col}"/>` : `<line class="vbus" x1="${bx}" x2="${bx}" y1="${m.y}" y2="${m.y + M.ROW}" style="stroke:${col}"/>`);
+      out.push(`<circle cx="${bx}" cy="${m.y + 21}" r="3.8" style="fill:${col}"/>`);
+      const lx = i === a ? x0 + 8 : bx + 8;
+      out.push(t(lx, m.y + 33, 'vl', tr(lab(ms[0]) + (ms.length > 1 ? ' +' + (ms.length - 1) : ''), 30)));
+      if (badges(ms[0])) out.push(t(i === a ? x1 - 6 : bx + M.CW - 30, m.y + 16, 'vbad', badges(ms[0]).trim(), i === a ? ' text-anchor="end"' : ''));
     }
     out.push('</g>');
   }
   for (const [i, list] of L.single) for (const o of list) {
     const x = L.colX(i) + 18, w = M.CW - 18, bx = L.busX(i), col = L.cols[i].color, m = o.ms[0];
     const where = [m.att || (m.how === 'set' ? 'set on the device' : m.how === 'l3' ? 'interface of the switch' : ''), m.via && m.via.length ? 'via ' + m.via.join(', ') : ''].filter(Boolean).join(' · ');
-    out.push(`<line class="vstub" x1="${bx}" x2="${x}" y1="${o.y + 14}" y2="${o.y + 14}" style="stroke:${col}"/><circle cx="${bx}" cy="${o.y + 14}" r="3" style="fill:${col}"/>`);
+    out.push(`<line class="vstub" x1="${bx}" x2="${x}" y1="${o.y + 16}" y2="${o.y + 16}" style="stroke:${col}"/><circle cx="${bx}" cy="${o.y + 16}" r="3.4" style="fill:${col}"/>`);
     out.push(`<g class="${dc(o.n)}" data-act="dev" data-dev="${esc(o.n)}" data-map="1"><rect class="vb${m.how === 'switch' ? ' inf' : ''}" x="${x}" y="${o.y}" width="${w}" height="${M.BOX}" rx="5"/>`);
-    out.push(t(x + 7, o.y + 13, 'vn', tr(o.n, 22)) + (badges(m) ? t(x + w - 6, o.y + 13, 'vbad', badges(m).trim(), ' text-anchor="end"') : ''));
-    out.push(t(x + 7, o.y + 26, 'vl', tr(lab(m) + (o.ms.length > 1 ? ' +' + (o.ms.length - 1) : ''), 32)) + t(x + 7, o.y + 38, 'vs', tr(where, 34)));
+    out.push(t(x + 8, o.y + 16, 'vn', tr(o.n, 20)) + (badges(m) ? t(x + w - 6, o.y + 16, 'vbad', badges(m).trim(), ' text-anchor="end"') : ''));
+    out.push(t(x + 8, o.y + 31, 'vl', tr(lab(m) + (o.ms.length > 1 ? ' +' + (o.ms.length - 1) : ''), 32)) + t(x + 8, o.y + 45, 'vs', tr(where, 32)));
     out.push('</g>');
   }
   if (o.style) {                                                    // exported: tap a device to see what it reaches, as on the page
@@ -1913,7 +1932,7 @@ function mapCss() {
   const root = document.documentElement, had = root.getAttribute('data-theme');
   root.setAttribute('data-theme', 'light');
   const cs = getComputedStyle(root), out = [];
-  for (const sh of document.styleSheets) { let rules = []; try { rules = sh.cssRules; } catch (e) {} for (const r of rules) if (r.selectorText && /svg\.v?map|\.ln-|\.pf-|\.ps-/.test(r.selectorText)) out.push(r.cssText); }
+  for (const sh of document.styleSheets) { let rules = []; try { rules = sh.cssRules; } catch (e) {} for (const r of rules) if (r.selectorText && /svg\.v?map|\.ln-|\.pf-|\.ps-|\.cb-/.test(r.selectorText)) out.push(r.cssText); }
   const css = out.join('\n').replace(/var\((--[\w-]+)\)/g, (m, v) => cs.getPropertyValue(v).trim() || m);
   if (had == null) root.removeAttribute('data-theme'); else root.setAttribute('data-theme', had);
   return css;
@@ -2002,7 +2021,7 @@ function renderPower() {
 function ipGrid(vn, from, to, lo, hi) {
   let h = '<div class="ipg">';
   for (let n = from; n <= to; n++) h += `<button class="ipc s-${n < lo || n > hi ? 'res' : ipInfo(vn, n).state}" data-act="ip" data-v="${esc(vn)}" data-ip="${n}" title="${intToIp(n)}">${n % 256}</button>`;
-  return h + '</div><div class="legend" style="margin-top:8px"><span><i style="background:var(--ip-free)"></i>free</span><span><i style="background:var(--ip-fixed)"></i>on a port</span><span><i style="background:var(--ip-noted)"></i>noted</span><span><i style="background:var(--err)"></i>conflict</span><span><i style="border:1px dashed var(--line)"></i>network / broadcast</span></div>';
+  return h + '</div><div class="legend" style="margin-top:8px"><span><i style="background:var(--ip-free)"></i>free</span><span><i style="background:var(--ip-fixed)"></i>on a port</span><span><i style="background:var(--ip-noted)"></i>noted</span><span><i style="background:var(--ip-dhcp)"></i>DHCP</span><span><i style="background:var(--err)"></i>conflict</span><span><i style="border:1px dashed var(--line)"></i>network / broadcast</span></div>';
 }
 function renderIps() {
   const vl = Object.keys(S.vlans).sort(natCmp), none = '<span class="mut">not set</span>';
@@ -2015,7 +2034,7 @@ function renderIps() {
       const [lo, hi] = hostRange(c);
       h += `<dt>Netmask</dt><dd class="mono" id="msk">${maskOf(c)}</dd><dt>Hosts</dt><dd class="mono">${intToIp(lo)} – ${intToIp(hi)} <span class="mut">(${hi - lo + 1} usable)</span></dd>` + (c.bits < 31 ? `<dt>Broadcast</dt><dd class="mono">${intToIp(c.last)}</dd>` : '');
     }
-    h += `<dt>Gateway</dt><dd class="mono">${v.gateway ? esc(v.gateway) : none}</dd><dt>DNS</dt><dd class="mono">${v.dns ? esc(v.dns) : none}</dd>` + (v.notes ? `<dt>Notes</dt><dd>${esc(v.notes)}</dd>` : '') + '</dl>';
+    h += `<dt>Gateway</dt><dd class="mono">${v.gateway ? esc(v.gateway) : none}</dd><dt>DNS</dt><dd class="mono">${v.dns ? esc(v.dns) : none}</dd><dt>DHCP</dt><dd class="mono">${v.dhcp ? esc(v.dhcp) : none}</dd>` + (v.notes ? `<dt>Notes</dt><dd>${esc(v.notes)}</dd>` : '') + '</dl>';
     h += `<div class="row" style="margin:8px 0"><button class="btn pri ed" data-act="ip-give" data-v="${esc(vn)}">Give me an IP</button><button class="btn sm ed" data-act="vlan-edit" data-v="${esc(vn)}">Edit VLAN</button></div>`;
     if (!c) h += '<p class="mut">Invalid subnet. Format: 192.168.50.0/24.</p>';
     else if (c.size <= 256) h += ipGrid(vn, c.base, c.last, ...hostRange(c));
@@ -2029,6 +2048,7 @@ function renderIps() {
     } else h += `<p class="mut">${c.size} addresses: list only.</p>`;
     const rows = [];
     if (V.gw != null) rows.push({ n: V.gw, to: V.gw, h: 'Gateway', note: '' });
+    for (const r of V.dhcp) rows.push({ n: r.from, to: r.to, h: 'DHCP', note: plural(r.to - r.from + 1, 'address') });
     for (const [n, refs] of V.fixed) rows.push({ n, to: n, h: refs.map(refBtn).join(', '), note: 'on a port', st: ipInfo(vn, n).state });
     for (const u of V.uses) rows.push({ n: u.from, to: u.to, h: esc(u.e.who || '?') + (u.e.iface ? ' · ' + refBtn(u.e.iface) : ''), note: esc(u.e.notes || '') });
     rows.sort((a, b) => a.n - b.n);
@@ -2225,6 +2245,47 @@ function adminUrl(n) {
   const ip = firstIp(d), u = d.admin.replace(/\{ip\}/g, ip);
   return /^https?:\/\//i.test(u) && (ip || !/\{ip\}/.test(d.admin)) ? u : '';
 }
+/* "ssh 22, http 8080, scpi 5025" on an address: how to reach each service. Known names
+   give a link (http, https) or a command to copy (ssh, telnet); the rest ip:port. */
+function serviceActions(ip, services) {
+  const out = [];
+  for (const raw of String(services || '').split(',').map(x => x.trim()).filter(Boolean)) {
+    const m = /^([a-z][\w.+-]*)\s*(\d+(?:-\d+)?)?/i.exec(raw), name = m ? m[1].toLowerCase() : raw, port = m && m[2] && !m[2].includes('-') ? m[2] : '';
+    if (name === 'http' || name === 'https') out.push({ link: name + '://' + ip + (port && port !== (name === 'http' ? '80' : '443') ? ':' + port : ''), label: raw });
+    else if (name === 'ssh') out.push({ cmd: 'ssh ' + (port && port !== '22' ? '-p ' + port + ' ' : '') + ip, label: raw });
+    else if (name === 'telnet') out.push({ cmd: 'telnet ' + ip + (port ? ' ' + port : ''), label: raw });
+    else out.push({ text: raw + (port ? ' → ' + ip + ':' + port : ''), label: raw });
+  }
+  return out;
+}
+/* "Connect": everything needed to reach a device, in one place. */
+function connectHtml(name) {
+  const d = S.devices[name], rows = [];
+  const act = a => (a.link ? `<a class="btn sm" href="${esc(a.link)}" target="_blank" rel="noopener noreferrer">${esc(a.label)}</a>` : a.cmd ? `<button class="btn sm cmdb" data-act="copy-t" data-t="${esc(a.cmd)}" title="Copy">${esc(a.cmd)}</button>` : `<span class="mono mut">${esc(a.text)}</span>`);
+  if (adminUrl(name)) rows.push(`<div class="item"><span class="lbl0">Admin</span>${webBtn(name, 'Open admin page')}<span class="sub mono">${esc(adminUrl(name))}</span></div>`);
+  /* addresses: its own ports, and network cards it has through adapters */
+  const ifs = [];
+  for (const p of d.ports) if (isNetKind(p.kind) && p.ip) ifs.push({ label: p.name, ref: name + ':' + p.name, p });
+  for (const ms of IX.l2.byIface.values()) for (const m of ms) if (m.dev === name && refDev(m.iface) !== name && m.ip && !ifs.some(f => f.ref === m.iface)) { const P = IX.ports.get(m.iface); ifs.push({ label: refDev(m.iface), ref: m.iface, p: P ? P.p : { ip: m.ip } }); }
+  for (const f of ifs) {
+    const ms = IX.l2.byIface.get(f.ref) || [], u = ms.find(m => m.mode === 'untagged'), vlan = f.p.vlan || (u && u.vlan) || '', att = u && u.att;
+    const acts = serviceActions(f.p.ip, f.p.services);
+    rows.push(`<div class="item"><span class="lbl0 mono">${esc(f.label)}</span><b class="mono">${esc(f.p.ip)}</b>${vlan ? `<span class="chip">${esc(vlan)}</span>` : ''}${acts.map(act).join(' ')}<span class="sub">${att ? 'Switch port ' + esc(att) : ''}${f.p.mac ? (att ? ' · ' : '') + 'MAC <span class="mono">' + esc(f.p.mac) + '</span>' : ''}</span></div>`);
+  }
+  /* serial consoles and JTAG: where they end up (a server or a PC) */
+  for (const p of d.ports) {
+    const lay = layerOf(p.kind);
+    if (lay !== 'serial' && lay !== 'jtag' && p.kind !== 'debug') continue;
+    for (const r of routesFrom(name + ':' + p.name)) {
+      const end = refDev(r.end), ed = S.devices[end];
+      if (!ed || !ed.types.some(t => t === 'server' || t === 'pc')) continue;
+      const via = [...new Set(r.hops.slice(0, -1).map(h => refDev(h.to)))].filter(x => x !== end);
+      rows.push(`<div class="item"><span class="lbl0">${lay === 'jtag' ? 'JTAG' : 'Console'}</span><span class="mono">${esc(p.name)}</span><span class="ar">→</span>${refBtn(r.end)}<span class="sub">${via.length ? 'via ' + via.map(esc).join(', ') : 'direct'}</span></div>`);
+    }
+  }
+  if (reachOf(name).own.length) rows.push(`<div class="item"><span class="lbl0">Networks</span><span>${esc(reachText(name).replace(/^/, ''))}</span><button class="linkb" data-act="see-vlans" data-dev="${esc(name)}">VLAN map</button></div>`);
+  return rows.length ? '<h3>Connect</h3><div class="list conn">' + rows.join('') + '</div>' : '';
+}
 const webBtn = (n, label) => { const u = adminUrl(n); return u ? `<a class="btn sm" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>` : ''; };
 function devSheet(name) {
   const open = new Set();
@@ -2237,9 +2298,8 @@ function devSheet(name) {
       let h = '<div class="chips">' + d.types.map(t => `<span class="chip">${esc(typeLabel(t))}</span>`).join('') + (d.project ? `<span class="chip pj">${esc(d.project)}</span>` : '') + '</div>';
       const kv = [['Model', d.model], ['Serial', d.serial], ['Owner', d.owner], ['Location', d.location], ['Notes', d.notes]].filter(x => x[1]);
       if (kv.length) h += '<dl class="kv">' + kv.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('') + '</dl>';
-      if (adminUrl(name)) h += `<p>${webBtn(name, 'Admin page')} <span class="mono mut">${esc(adminUrl(name))}</span></p>`;
-      if (reachOf(name).own.length) h += `<p><span class="lbl">Networks</span> ${esc(reachText(name))} <button class="linkb" data-act="see-vlans" data-dev="${esc(name)}">VLAN map</button></p>`;
       h += IX.issues.filter(i => i.dev === name).map(issueHtml).join('');
+      h += connectHtml(name);
       /* power */
       const ins = upLinks(name);
       if (ins.length || powerOut(name).length || d.expectedPower !== 'none') {
@@ -2682,6 +2742,7 @@ function ipDlg(vn, n) {
       const info = ipInfo(vn, n), lab = { free: ['free', 'ok'], fixed: ['on a port', ''], noted: ['noted', ''], conf: ['conflict', 'err'] }[info.state];
       let h = `<p><span class="chip">VLAN ${esc(vn || '?')}</span> <span class="chip ${lab[1]}">${res() ? 'network / broadcast' : lab[0]}</span></p>`;
       if (info.gw) h += '<p>VLAN gateway.</p>';
+      if (info.dhcp) h += `<p>${info.fixed.length ? 'Inside the DHCP range: make sure the DHCP server does not hand it out.' : 'Handed out by DHCP.'}</p>`;
       if (info.fixed.length) h += '<p class="lbl">On port</p>' + info.fixed.map(r => { const P = IX.ports.get(r); return `<div>${refBtn(r)} ${P ? kindChip(P.p.kind) : ''}${P && P.p.services ? ' <span class="mut">' + esc(P.p.services) + '</span>' : ''}</div>`; }).join('');
       if (info.uses.length) h += '<p class="lbl">Noted</p>' + info.uses.map(u => `<div class="pbox"><div class="pbd"><b>${esc(u.e.who || '?')}</b> · <span class="mono">${esc(u.e.from)}${u.e.to ? '–' + esc(u.e.to) : ''}</span>${u.e.iface ? '<br>Only for ' + refBtn(u.e.iface) : ''}${u.e.notes ? '<br>' + esc(u.e.notes) : ''}<div class="row ed" style="margin-top:6px"><button class="btn sm" data-act="ipuse-edit" data-i="${u.i}">Edit</button><button class="btn sm dan" data-act="ipuse-del" data-i="${u.i}">Delete</button></div></div></div>`).join('');
       if (info.state === 'conf') h += '<div class="iss err"><b>Conflict</b><span>More than one use, or inside a range reserved for another interface.</span></div>';
@@ -2748,12 +2809,13 @@ function ipUseDlg(o) {
 }
 function vlanDlg(name) {
   const v0 = name ? S.vlans[name] : null;
-  const w = { orig: v0 ? name : null, name: v0 ? name : '', id: v0 && v0.id != null ? String(v0.id) : '', subnet: v0 ? v0.subnet || '' : '', gateway: v0 ? v0.gateway || '' : '', dns: v0 ? v0.dns || '' : '', scope: v0 ? v0.scope || 'local' : 'local', notes: v0 ? v0.notes || '' : '' };
+  const w = { orig: v0 ? name : null, name: v0 ? name : '', id: v0 && v0.id != null ? String(v0.id) : '', subnet: v0 ? v0.subnet || '' : '', gateway: v0 ? v0.gateway || '' : '', dns: v0 ? v0.dns || '' : '', dhcp: v0 ? v0.dhcp || '' : '', scope: v0 ? v0.scope || 'local' : 'local', notes: v0 ? v0.notes || '' : '' };
   const maskHtml = () => { const c = parseCidr(w.subnet); return c ? `<p class="mut">Netmask <span class="mono">${maskOf(c)}</span> · ${hostRange(c)[1] - hostRange(c)[0] + 1} usable</p>` : '<p class="mut">Format: 192.168.50.0/24</p>'; };
   openDlg({
     title: () => (w.orig ? 'VLAN ' + w.orig : 'New VLAN'),
     body: () => '<div class="g2">' + fld('Name', inp('name', w.name)) + fld('Id (802.1Q)', inp('id', w.id, 'inputmode="numeric"')) + '</div>' + fld('Subnet (CIDR)', inp('subnet', w.subnet, 'inputmode="decimal" data-re placeholder="192.168.50.0/24"')) + `<div id="v-mask">${maskHtml()}</div>` +
       '<div class="g2">' + fld('Gateway', inp('gateway', w.gateway, 'inputmode="decimal"')) + fld('DNS', inp('dns', w.dns)) + '</div>' +
+      fld('DHCP ranges, comma separated', inp('dhcp', w.dhcp, 'inputmode="decimal" placeholder="192.168.50.200-192.168.50.249"')) +
       fld('Scope', `<select data-f="scope">${opt('local', 'Local (lab only)', w.scope)}${opt('it', 'IT', w.scope)}</select>`) + fld('Notes', inp('notes', w.notes)),
     foot: () => `<button class="btn" data-act="dlg-back">Cancel</button>${w.orig ? '<button class="btn dan" data-act="del">Delete</button>' : ''}<button class="btn pri" data-act="save">Save</button>`,
     set(f, v) { w[f] = v; },
@@ -2763,7 +2825,7 @@ function vlanDlg(name) {
         const nm = String(w.name || '').trim();
         if (!nm) return toast('Name missing.');
         if (nm !== w.orig && S.vlans[nm]) return toast(`${nm} already exists.`);
-        const idn = String(w.id).trim(), v = { id: idn === '' ? null : isNaN(+idn) ? idn : +idn, subnet: String(w.subnet || '').trim(), gateway: String(w.gateway || '').trim(), dns: String(w.dns || '').trim(), scope: w.scope, notes: String(w.notes || '').trim() };
+        const idn = String(w.id).trim(), v = { id: idn === '' ? null : isNaN(+idn) ? idn : +idn, subnet: String(w.subnet || '').trim(), gateway: String(w.gateway || '').trim(), dns: String(w.dns || '').trim(), dhcp: String(w.dhcp || '').trim(), scope: w.scope, notes: String(w.notes || '').trim() };
         if (commit(w.orig ? `VLAN ${w.orig} changed` + (nm !== w.orig ? ` (now ${nm})` : '') : `VLAN ${nm} added`, s => {
           if (w.orig && w.orig !== nm) { delete s.vlans[w.orig]; for (const n of Object.keys(s.devices)) for (const p of s.devices[n].ports) if (p.vlan === w.orig) p.vlan = nm; for (const e of s.ipUse) if (e.vlan === w.orig) e.vlan = nm; }
           s.vlans[nm] = v;
@@ -2794,12 +2856,12 @@ function reportHtml() {
   const table = (head, rows) => '<table><thead><tr>' + head.map(x => `<th>${x}</th>`).join('') + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(c => `<td>${esc(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
   const devs = IX.names.map(n => { const d = S.devices[n]; return [n, d.types.map(typeLabel).join(', '), d.project, d.model, d.serial, d.location, d.owner, d.ports.filter(p => p.ip).map(p => p.name + ' ' + p.ip + (p.vlan ? ' (' + p.vlan + ')' : '')).join(', '), switchesOf(n).join(', '), d.notes]; });
   const cabs = S.links.slice().sort((a, b) => natCmp(a.id, b.id)).map(l => [l.id, LAYERS[linkLayer(l)].label, l.a, l.b, l.notes]);
-  const vl = Object.keys(S.vlans).sort(natCmp).map(v => { const x = S.vlans[v], c = parseCidr(x.subnet); return [v, x.id == null ? '' : x.id, x.subnet || '', c ? maskOf(c) : '', x.gateway || '', x.dns || '', x.notes || '']; });
+  const vl = Object.keys(S.vlans).sort(natCmp).map(v => { const x = S.vlans[v], c = parseCidr(x.subnet); return [v, x.id == null ? '' : x.id, x.subnet || '', c ? maskOf(c) : '', x.gateway || '', x.dns || '', x.dhcp || '', x.notes || '']; });
   const notes = S.ipUse.map(e => [e.vlan || '', e.from + (e.to ? '–' + e.to : ''), e.who || '', e.iface || '', e.notes || '']);
   return '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>Labmap report · ' + (SITE ? esc(SITE) + ' · ' : '') + 'rev ' + S.rev + '</title><style>body{font:13px system-ui,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0}h2{font-size:15px;margin:28px 0 8px}p{color:#555}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}th{background:#eee}svg{max-width:100%;height:auto}@media print{body{margin:0}h2{break-after:avoid}tr{break-inside:avoid}}</style></head><body>' +
     `<h1>Labmap report${SITE ? ' · ' + esc(SITE) : ''}</h1><p>rev ${S.rev} · ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC · ${plural(IX.names.length, 'device')} · ${plural(S.links.length, 'cable')}</p>` +
     '<h2>Map</h2>' + exportMapSvg() + '<h2>VLAN map</h2>' + exportVlanSvg() + '<h2>Devices</h2>' + table(['Name', 'Type', 'Project', 'Model', 'Serial', 'Location', 'Owner', 'IPs', 'Switched by', 'Notes'], devs) +
-    '<h2>Cables</h2>' + table(['Id', 'Layer', 'From', 'To', 'Notes'], cabs) + '<h2>VLANs</h2>' + table(['Name', 'Id', 'Subnet', 'Netmask', 'Gateway', 'DNS', 'Notes'], vl) +
+    '<h2>Cables</h2>' + table(['Id', 'Layer', 'From', 'To', 'Notes'], cabs) + '<h2>VLANs</h2>' + table(['Name', 'Id', 'Subnet', 'Netmask', 'Gateway', 'DNS', 'DHCP', 'Notes'], vl) +
     '<h2>IP notes</h2>' + table(['VLAN', 'Address', 'User', 'Interface', 'Notes'], notes) + '</body></html>\n';
 }
 function exportDlg(kind) {
@@ -2978,6 +3040,7 @@ const ACT = {
   'toast-x': () => hideToast(),
   'dlg-close': () => closeDlg(true),
   'dlg-back': () => closeDlg(),
+  'copy-t': el => copyText(el.dataset.t, el),
   copy: el => { const src = $('#' + el.dataset.src); if (src) copyText(src.textContent, src); },
   'log-more': () => { UI.logN += 100; renderData(); },
   'err-close': el => { el.hidden = true; }

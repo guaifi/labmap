@@ -60,7 +60,7 @@ const serial = () => 'SN' + pad(Math.floor(100000 + (macN * 7919 + Object.keys(S
 
 /* ---------- VLANs and addresses ---------- */
 S.vlans = {
-  'LAB': { id: 110, subnet: '10.20.10.0/24', gateway: '10.20.10.1', dns: '10.20.0.53, 10.20.0.54', scope: 'it', notes: 'Lab VLAN, managed by IT. IT DHCP on .200-.249.' },
+  'LAB': { id: 110, subnet: '10.20.10.0/24', gateway: '10.20.10.1', dns: '10.20.0.53, 10.20.0.54', dhcp: '10.20.10.200-10.20.10.249', scope: 'it', notes: 'Lab VLAN, managed by IT.' },
   'TEST-A': { id: 901, subnet: '192.168.50.0/24', scope: 'local', notes: 'Radio tests. Exists only on the lab switches; no uplink, no DNS.' },
   'TEST-B': { id: 902, subnet: '192.168.60.0/24', gateway: '192.168.60.1', scope: 'local', notes: 'Control and sensor tests. Routed by the lab server (eth1.902).' },
   'TEST-C': { id: 903, subnet: '172.16.30.0/26', scope: 'local', notes: 'Video bench. Small subnet on purpose.' },
@@ -82,7 +82,6 @@ function ipNext(vlan) {
   }
 }
 S.ipUse = [
-  { vlan: 'LAB', from: '10.20.10.200', to: '10.20.10.249', who: 'IT', notes: 'DHCP for laptops' },
   { vlan: 'LAB', from: '10.20.10.150', who: 'mjones', notes: 'Test laptop, temporary' },
   { vlan: 'TEST-A', from: '192.168.50.60', to: '192.168.50.69', iface: 'board-01:eth0', who: 'Project BRAVO', notes: 'The board changes IP during the boot test' },
   { vlan: 'TEST-B', from: '192.168.60.100', to: '192.168.60.109', who: 'Project ALPHA', notes: 'Simulators on a laptop' },

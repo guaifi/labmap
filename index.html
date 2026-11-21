@@ -14,7 +14,7 @@
   --err:#c62828; --err-bg:#fdecea; --warn:#a86200; --warn-bg:#fff3d9; --ok:#1b7f4b;
   --L-net:#2563c9; --L-power:#d1432f; --L-serial:#1f8a4c; --L-jtag:#8b46c9; --L-usb:#0e8f9c; --L-video:#c2327e;
   --L-bus:#b96f00; --L-rf:#6b7a12; --L-radio:#4a55d6; --L-discrete:#8a6248; --L-other:#6b7280;
-  --ip-free:#e1e7e5; --ip-fixed:#2f6f9f; --ip-noted:#8fb7d6; --ip-on:#ffffff;
+  --ip-free:#e1e7e5; --ip-fixed:#2f6f9f; --ip-noted:#8fb7d6; --ip-dhcp:#c8e6c0; --ip-on:#ffffff;
   --band:#dfe6e4; --shadow:0 8px 30px rgba(10,30,26,.25);
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
@@ -25,7 +25,7 @@
   --err:#ff7b72; --err-bg:#3a1a18; --warn:#f0b040; --warn-bg:#3a2c10; --ok:#5fd08a;
   --L-net:#6ea8ff; --L-power:#ff8a70; --L-serial:#5fd08a; --L-jtag:#c08cff; --L-usb:#4fd3df; --L-video:#ff7fbf;
   --L-bus:#f0b040; --L-rf:#c3d24a; --L-radio:#98a2ff; --L-discrete:#c9a184; --L-other:#9aa3ad;
-  --ip-free:#27322f; --ip-fixed:#4f9bd1; --ip-noted:#2f5673; --ip-on:#06141c;
+  --ip-free:#27322f; --ip-fixed:#4f9bd1; --ip-noted:#2f5673; --ip-dhcp:#2e4a2a; --ip-on:#06141c;
   --band:#222d2b; --shadow:0 8px 30px rgba(0,0,0,.6); color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0f1413; --panel:#182020; --panel2:#1e2827; --ink:#e6eeec; --mut:#93a4a0; --line:#34423f; --line2:#27322f;
@@ -33,7 +33,7 @@
   --err:#ff7b72; --err-bg:#3a1a18; --warn:#f0b040; --warn-bg:#3a2c10; --ok:#5fd08a;
   --L-net:#6ea8ff; --L-power:#ff8a70; --L-serial:#5fd08a; --L-jtag:#c08cff; --L-usb:#4fd3df; --L-video:#ff7fbf;
   --L-bus:#f0b040; --L-rf:#c3d24a; --L-radio:#98a2ff; --L-discrete:#c9a184; --L-other:#9aa3ad;
-  --ip-free:#27322f; --ip-fixed:#4f9bd1; --ip-noted:#2f5673; --ip-on:#06141c;
+  --ip-free:#27322f; --ip-fixed:#4f9bd1; --ip-noted:#2f5673; --ip-dhcp:#2e4a2a; --ip-on:#06141c;
   --band:#222d2b; --shadow:0 8px 30px rgba(0,0,0,.6); color-scheme:dark}
 
 *{box-sizing:border-box}
@@ -112,18 +112,20 @@ body[data-tab=map] main.wrap,body[data-tab=map] .top .wrap,body[data-tab=map] #n
 .mapwrap{overflow:auto;-webkit-overflow-scrolling:touch;height:min(68vh,760px);background:var(--panel);border:1px solid var(--line);border-radius:8px}
 svg.map{display:block;font-family:var(--mono);user-select:none;-webkit-user-select:none}
 svg.map .bg{fill:var(--panel)}
-svg.map .cap{fill:var(--mut);font:600 9px var(--sans);letter-spacing:.08em;text-transform:uppercase}
+svg.map .cap{fill:var(--mut);font:700 11px var(--sans);letter-spacing:.08em;text-transform:uppercase}
+svg.map .colbg{opacity:.07} svg.map .rb{opacity:.9}
+.cb-0{fill:var(--L-power)} .cb-1{fill:var(--L-discrete)} .cb-2{fill:var(--acc)} .cb-3{fill:var(--L-usb)} .cb-4{fill:var(--L-net)}
 svg.map .band{fill:var(--band);stroke:none}
-svg.map .bandt{fill:var(--ink);font:700 11px var(--sans);letter-spacing:.06em}
+svg.map .bandt{fill:var(--ink);font:700 12.5px var(--sans);letter-spacing:.06em}
 svg.map .dev{cursor:pointer}
 svg.map .bx{fill:var(--panel);stroke:var(--mut);stroke-width:1}
 svg.map .infra .bx{fill:var(--panel2);stroke:var(--ink);stroke-width:1.3}
 svg.map .pass .bx{stroke-dasharray:4 2}
 svg.map .sel .bx{stroke:var(--acc);stroke-width:3}
-svg.map .nm{fill:var(--ink);font-size:11px;font-weight:700}
-svg.map .sb{fill:var(--mut);font-size:8.5px}
+svg.map .nm{fill:var(--ink);font-size:13px;font-weight:700}
+svg.map .sb{fill:var(--mut);font-size:10px}
 svg.map .sep{stroke:var(--line);stroke-width:1}
-svg.map .pt{fill:var(--ink);font-size:8.5px}
+svg.map .pt{fill:var(--ink);font-size:10.5px}
 svg.map .pt.bad{fill:var(--err)}
 svg.map .dim{opacity:.22}
 svg.map .hitq .bx{stroke:var(--warn);stroke-width:3}
@@ -138,16 +140,16 @@ svg.map.has-sel .lk:not(.hl){opacity:.1}
 svg.map .lk.hl .v{opacity:1}
 svg.map .lk.hl .v{stroke-width:3}
 svg.vmap .vh{fill:var(--panel2);stroke:var(--line)} svg.vmap .vhead{cursor:pointer}
-svg.vmap .vt{fill:var(--ink);font-size:11px;font-weight:700} svg.vmap .vs{fill:var(--mut);font-size:8.5px} svg.vmap .vwarn{fill:var(--warn)}
+svg.vmap .vt{fill:var(--ink);font-size:13px;font-weight:700} svg.vmap .vs{fill:var(--mut);font-size:10px} svg.vmap .vwarn{fill:var(--warn)}
 svg.vmap .vbus{stroke-width:3;stroke-linecap:round} svg.vmap .vstub{stroke-width:1.6}
 svg.vmap .vb{fill:var(--panel);stroke:var(--ink);stroke-width:1} svg.vmap .vb.inf{stroke-dasharray:4 3}
 svg.vmap .vdev{cursor:pointer} svg.vmap .vdev.sel .vb{stroke:var(--acc);stroke-width:2.4}
 svg.vmap.has-sel .vdev:not(.sel):not(.reach):not(.routed){opacity:.25}
 svg.vmap .vdev.reach .vb{stroke:var(--ok);stroke-width:2} svg.vmap .vdev.routed .vb{stroke:var(--warn);stroke-width:1.6;stroke-dasharray:5 3}
 svg.vmap .vhead.voff{opacity:.35} svg.vmap .vhead.von .vh{stroke:var(--acc);stroke-width:2} svg.vmap .vhead.vrt .vh{stroke:var(--warn);stroke-dasharray:5 3} svg.vmap .vdev.dim{opacity:.25}
-svg.vmap .vn{fill:var(--ink);font-size:10px;font-weight:700} svg.vmap .vl{fill:var(--ink);font-size:8.5px} svg.vmap .vbad{fill:var(--acc);font-size:8.5px;font-weight:700}
+svg.vmap .vn{fill:var(--ink);font-size:12.5px;font-weight:700} svg.vmap .vl{fill:var(--ink);font-size:10.5px} svg.vmap .vbad{fill:var(--acc);font-size:10px;font-weight:700}
 .vhelp{font-size:13px;margin:4px 0} .vhelp summary{cursor:pointer;color:var(--mut)} .vhelp ul{margin:6px 0;padding-left:18px} .vhelp li{margin:2px 0}
-svg.map .ltag rect{fill:var(--tag)} svg.map .ltag text{fill:var(--tag-ink);font-size:8.5px;font-weight:700}
+svg.map .ltag rect{fill:var(--tag)} svg.map .ltag text{fill:var(--tag-ink);font-size:10px;font-weight:700}
 svg.map .ltag.nolab rect{fill:var(--panel);stroke:var(--mut);stroke-dasharray:2 2} svg.map .ltag.nolab text{fill:var(--mut);font-weight:400}
 .ln-net .v{stroke:var(--L-net)!important}.ln-power .v{stroke:var(--L-power)!important}.ln-serial .v{stroke:var(--L-serial)!important}
 .ln-jtag .v{stroke:var(--L-jtag)!important}.ln-usb .v{stroke:var(--L-usb)!important}.ln-video .v{stroke:var(--L-video)!important}
@@ -176,6 +178,9 @@ button.tag{min-height:26px}
 .list>.gh{padding:6px 12px;background:var(--band);font:700 11px var(--sans);letter-spacing:.06em;text-transform:uppercase}
 .iss-row{padding:0 12px 0 0;gap:6px;flex-wrap:nowrap}
 .iss-row>button.item{border-top:0;flex:1;width:auto;min-width:0}
+.conn .lbl0{min-width:64px;font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.conn .cmdb{font-family:var(--mono);font-size:12px}
+.conn .ar{color:var(--mut)}
 .item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;min-height:48px;padding:8px 12px;border:0;border-top:1px solid var(--line2);background:none;text-align:left}
 .item:first-child{border-top:0}
 .item .nm{font:700 13px var(--mono)}
@@ -210,6 +215,7 @@ table.pt tr.pd td{background:var(--panel2);border-top:0;padding-top:0}
 .ipc{height:30px;padding:0;border:0;border-radius:3px;font:10px var(--mono);background:var(--ip-free);color:var(--mut)}
 .ipc.s-fixed{background:var(--ip-fixed);color:var(--ip-on);font-weight:700}
 .ipc.s-noted{background:var(--ip-noted);color:var(--ink)}
+.ipc.s-dhcp{background:var(--ip-dhcp);color:var(--ink)}
 .ipc.s-conf{background:var(--err);color:#fff;font-weight:700}
 .ipc.s-res{background:transparent;border:1px dashed var(--line);color:var(--mut)}
 .legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--mut)}
