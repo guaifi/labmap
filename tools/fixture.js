@@ -160,10 +160,10 @@ for (const g of ['a', 'b']) pool('hub-' + g, p => {
 /* ---------- fixed infrastructure ---------- */
 pools.sw.free.unshift(alloc('sw'));                                // creates sw-lab-1 (and with it wall-1 and ups-1)
 dev('server-lab', { types: ['server'], location: 'Central rack', power: 'ups', owner: 'lab', serial: serial(),
-  notes: 'Shared serial consoles (ser2net) and remote JTAG (XVC). Two supplies: one on the UPS, one on the wall.',
+  notes: 'Shared serial consoles and remote JTAG. Two supplies: one on the UPS, one on the wall.',
   ports: ['eth[0-1] rj45', 'bmc rj45', 'usb[1-8] usb', 'ac-in[1-2] ac-in', 'vga vga', 'eth1.901 iface', 'eth1.902 iface', 'eth1.903 iface'] });
-net('server-lab:eth0', 'LAB', { services: 'ssh, ser2net 2001-2032, xvc 2542-2549, tftp, nfs' });
-net('server-lab:bmc', 'LAB', { services: 'https, ipmi' });
+net('server-lab:eth0', 'LAB', { services: 'ssh' });
+net('server-lab:bmc', 'LAB', { services: 'https' });
 { // trunk with the test VLANs
   const sw = alloc('sw'); link('net', 'server-lab:eth1', sw, '802.1Q trunk with TEST-A, TEST-B and TEST-C');
   port('server-lab:eth1').mac = mac(); port('server-lab:eth1').notes = 'Trunk; the IPs are on the eth1.90x interfaces';
@@ -172,8 +172,8 @@ net('server-lab:bmc', 'LAB', { services: 'https, ipmi' });
 }
 power(alloc('ups'), 'server-lab:ac-in1');
 power(alloc('strip-wall'), 'server-lab:ac-in2');
-dev('radiohub-1', { types: ['radiohub'], location: 'Ceiling, centre', power: 'wall', admin: 'http://{ip}:8123', notes: 'Zigbee coordinator and Thread border router', ports: ['eth0 rj45', 'zigbee zigbee', 'thread thread', 'ble ble', 'dc-in dc-in'] });
-net('radiohub-1:eth0', 'LAB', { services: 'http 8123, mqtt' });
+dev('radiohub-1', { types: ['radiohub'], location: 'Ceiling, centre', power: 'wall', admin: 'http://{ip}', notes: 'Zigbee coordinator and Thread border router', ports: ['eth0 rj45', 'zigbee zigbee', 'thread thread', 'ble ble', 'dc-in dc-in'] });
+net('radiohub-1:eth0', 'LAB', { services: 'http' });
 power(alloc('strip-ups'), 'radiohub-1:dc-in', '5 V adapter');
 dev('ap-lab-1', { types: ['ap'], location: 'Ceiling, centre', power: 'none', admin: 'https://{ip}', notes: 'PoE powered from the switch. Two SSIDs: lab (LAB) and radio tests (TEST-A)', ports: ['eth0 rj45', 'wifi wifi', 'wifi2 wifi', 'mgmt iface'] });
 { // the AP is managed: a trunk with LAB untagged and TEST-A tagged, one SSID per VLAN
@@ -197,7 +197,7 @@ function psu(pr, loc, g) {
   const n = nn('psu');
   dev(n, { types: ['psu'], project: pr, location: loc, power: 'pdu', admin: 'http://{ip}', serial: serial(), notes: '3-channel bench supply, LAN control', ports: ['ac-in ac-in', 'ch[1-3] dc-out', 'eth0 rj45', 'usb1 usb'] });
   power(alloc('pdu-' + g), n + ':ac-in');
-  net(n + ':eth0', 'LAB', { services: 'scpi 5025' });
+  net(n + ':eth0', 'LAB', { services: 'http' });
   return n;
 }
 /* serial console of a device: USB-serial adapter → hub → server */
@@ -210,7 +210,7 @@ function consoleOf(pr, loc, g, ref, kind) {
 }
 function jtag(pr, loc, g, ref) {
   const n = nn('usbjtag');
-  dev(n, { types: ['adapter'], project: pr, location: loc, notes: 'USB-JTAG probe, used remotely over XVC', ports: ['usb1 usb', 'jtag jtag'] });
+  dev(n, { types: ['adapter'], project: pr, location: loc, notes: 'USB-JTAG probe', ports: ['usb1 usb', 'jtag jtag'] });
   link('jtag', ref, n + ':jtag', '14-pin ribbon cable');
   link('usb', n + ':usb1', alloc('hub-' + g));
   return n;
@@ -240,7 +240,7 @@ function alpha(s) {
   link('serial', eq[0] + ':rs485-out', eq[1] + ':rs485-in', 'RS-485'); link('serial', eq[1] + ':rs485-out', eq[2] + ':rs485-in', 'RS-485');
   link('serial', eq[2] + ':rs485-out', ana + ':rs485-1', 'Listen only');
   const rel = dev(nn('dio'), { types: ['instrument'], project: pr, location: loc, power: 'pdu', admin: 'http://{ip}', notes: '8-channel LAN I/O module for discretes', ports: ['eth0 rj45', 'k[1-8] discrete', 'ac-in ac-in'] });
-  power(alloc('pdu-' + g), rel + ':ac-in'); net(rel + ':eth0', 'LAB', { services: 'http, modbus' });
+  power(alloc('pdu-' + g), rel + ':ac-in'); net(rel + ':eth0', 'LAB', { services: 'http' });
   eq.forEach((e, i) => { link('discrete', rel + ':k' + (2 * i + 1), e + ':disc1', 'Enable'); link('discrete', rel + ':k' + (2 * i + 2), e + ':disc2', 'Start'); });
   link('discrete', eq[0] + ':disc3', eq[1] + ':disc3', 'Interlock'); link('discrete', eq[1] + ':disc4', eq[2] + ':disc4', 'Interlock');
   const p = pc(pr, loc, 'team-alpha'); link('usb', ana + ':usb1', p + ':usb1', 'Local control of the analyser');
@@ -252,14 +252,14 @@ function bravo(s) {
   const fu = psu(pr, loc, g);
   const pl = [1, 2].map(i => {
     const n = dev(nn('board'), { types: ['board'], project: pr, location: loc, power: 'dc', admin: 'http://{ip}', owner: 'team-bravo', serial: serial(), notes: 'FPGA/SoC board with radio front end', ports: boardPorts(['sfp0 sfp', 'rf-tx rf', 'rf-rx rf']) });
-    power(fu + ':ch' + i, n + ':dc-in', '12 V'); net(n + ':eth0', vl, { services: 'ssh, iperf' });
+    power(fu + ':ch' + i, n + ':dc-in', '12 V'); net(n + ':eth0', vl, { services: 'ssh' });
     consoleOf(pr, loc, g, n + ':uart0'); jtag(pr, loc, g, n + ':jtag');
     return n;
   });
   const sa = dev(nn('inst'), { types: ['instrument'], project: pr, location: loc, power: 'pdu', admin: 'http://{ip}', serial: serial(), notes: 'Spectrum analyser', ports: ['eth0 rj45', 'usb1 usb', 'ac-in ac-in', 'rf-in rf', 'trig-in discrete'] });
   const sg = dev(nn('inst'), { types: ['instrument'], project: pr, location: loc, power: 'pdu', admin: 'http://{ip}', serial: serial(), notes: 'Signal generator', ports: ['eth0 rj45', 'usb1 usb', 'ac-in ac-in', 'rf-out rf', 'trig-out discrete'] });
   const osc = dev(nn('inst'), { types: ['instrument'], project: pr, location: loc, power: 'pdu', admin: 'http://{ip}', serial: serial(), notes: '4-channel oscilloscope', ports: ['eth0 rj45', 'usb1 usb', 'ac-in ac-in', 'ch[1-4] rf'] });
-  for (const i of [sa, sg, osc]) { power(alloc('pdu-' + g), i + ':ac-in'); net(i + ':eth0', 'LAB', { services: 'http, scpi 5025' }); }
+  for (const i of [sa, sg, osc]) { power(alloc('pdu-' + g), i + ':ac-in'); net(i + ':eth0', 'LAB', { services: 'http' }); }
   const at1 = dev(nn('att'), { types: ['adapter'], project: pr, location: loc, notes: '30 dB fixed attenuator, 2 W', ports: ['in rf', 'out rf'] });
   const at2 = dev(nn('att'), { types: ['adapter'], project: pr, location: loc, notes: '10 dB fixed attenuator', ports: ['in rf', 'out rf'] });
   const cb = dev(nn('comb'), { types: ['adapter'], project: pr, location: loc, notes: '2-way combiner', ports: ['sum rf', 'in1 rf', 'in2 rf'] });
@@ -281,10 +281,10 @@ function charlie(s) {
   const can = dev(nn('canbus'), { types: ['bus'], project: pr, location: loc, notes: 'CAN bus strip, 120 Ω termination at both ends', ports: ['can-[1-6] can'] });
   const pl = [1, 2].map(i => {
     const n = dev(nn('board'), { types: ['board'], project: pr, location: loc, power: 'dc', admin: 'http://{ip}', owner: 'team-charlie', serial: serial(), notes: 'Video processing board', ports: boardPorts(['sdi-in sdi', 'hdmi-out hdmi', 'can0 can']) });
-    power(fu + ':ch' + i, n + ':dc-in', '12 V'); net(n + ':eth0', vl, { services: 'ssh, rtsp' });
+    power(fu + ':ch' + i, n + ':dc-in', '12 V'); net(n + ':eth0', vl, { services: 'ssh' });
     consoleOf(pr, loc, g, n + ':uart0');
     const c = dev(nn('cam'), { types: ['sensor'], project: pr, location: loc, power: 'none', admin: 'http://{ip}', serial: serial(), notes: 'Camera with SDI output, PoE powered', ports: ['eth0 rj45', 'sdi-out sdi'] });
-    net(c + ':eth0', vl, { services: 'http, rtsp', notes: 'PoE' });
+    net(c + ':eth0', vl, { services: 'http', notes: 'PoE' });
     link('video', c + ':sdi-out', n + ':sdi-in', '75 Ω coax, 3G-SDI'); link('video', n + ':hdmi-out', mon + ':hdmi' + i);
     link('bus', n + ':can0', can + ':can-' + i, 'CAN at 500 kbit/s');
     return n;
@@ -316,7 +316,7 @@ function delta(s) {
 function echo(s) {
   const pr = pname('ECHO', s), loc = 'Bench 5', g = 'a';
   const gw = dev(nn('board'), { types: ['board'], project: pr, location: loc, power: 'wall', admin: 'http://{ip}', owner: 'team-echo', serial: serial(), notes: 'Gateway under development with an 802.15.4 radio', ports: boardPorts(['radio0 zigbee']) });
-  power(alloc('strip-ups'), gw + ':dc-in', '12 V adapter'); net(gw + ':eth0', 'TEST-B', { services: 'ssh, mqtt' });
+  power(alloc('strip-ups'), gw + ':dc-in', '12 V adapter'); net(gw + ':eth0', 'TEST-B', { services: 'ssh' });
   consoleOf(pr, loc, g, gw + ':uart0');
   link('radio', gw + ':radio0', 'radiohub-1:zigbee', 'Joined the Zigbee network as a router');
   for (let i = 0; i < 6; i++) { const n = dev(nn('sensor'), { types: ['sensor'], project: pr, location: loc, notes: ['Temperature and humidity', 'Door contact', 'Presence', 'Power meter', 'Vibration', 'Light level'][i] + ', battery', ports: ['zigbee zigbee'] }); link('radio', n + ':zigbee', 'radiohub-1:zigbee'); }

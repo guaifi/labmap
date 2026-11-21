@@ -144,8 +144,8 @@
      Cable id tags (selected cables only) are tried along the curve and put
      where they cover no other tag or box (placeTags).
    · Device sheet "Connect" (connectHtml): admin page, each address with its VLAN,
-     switch port and services turned into links or commands to copy
-     (serviceActions), and where its serial console and JTAG end up.
+     switch port, MAC and services as written, and where its serial console and
+     JTAG end up by the cables. Nothing is assumed about how to use a service.
    · Map taps: the first tap on a device or cable highlights it (selection bar
      with Open); a second tap, or Open, opens its sheet. In edit mode every
      physical port of a visible layer is on its box (free ones hollow): tap a
@@ -2245,23 +2245,11 @@ function adminUrl(n) {
   const ip = firstIp(d), u = d.admin.replace(/\{ip\}/g, ip);
   return /^https?:\/\//i.test(u) && (ip || !/\{ip\}/.test(d.admin)) ? u : '';
 }
-/* "ssh 22, http 8080, scpi 5025" on an address: how to reach each service. Known names
-   give a link (http, https) or a command to copy (ssh, telnet); the rest ip:port. */
-function serviceActions(ip, services) {
-  const out = [];
-  for (const raw of String(services || '').split(',').map(x => x.trim()).filter(Boolean)) {
-    const m = /^([a-z][\w.+-]*)\s*(\d+(?:-\d+)?)?/i.exec(raw), name = m ? m[1].toLowerCase() : raw, port = m && m[2] && !m[2].includes('-') ? m[2] : '';
-    if (name === 'http' || name === 'https') out.push({ link: name + '://' + ip + (port && port !== (name === 'http' ? '80' : '443') ? ':' + port : ''), label: raw });
-    else if (name === 'ssh') out.push({ cmd: 'ssh ' + (port && port !== '22' ? '-p ' + port + ' ' : '') + ip, label: raw });
-    else if (name === 'telnet') out.push({ cmd: 'telnet ' + ip + (port ? ' ' + port : ''), label: raw });
-    else out.push({ text: raw + (port ? ' → ' + ip + ':' + port : ''), label: raw });
-  }
-  return out;
-}
-/* "Connect": everything needed to reach a device, in one place. */
+/* "Connect": what is written about reaching a device, in one place. Nothing is assumed:
+   addresses, VLAN, switch port, MAC and the services text as entered, the admin page
+   if one is set, and where its serial console and JTAG end up by the cables. */
 function connectHtml(name) {
   const d = S.devices[name], rows = [];
-  const act = a => (a.link ? `<a class="btn sm" href="${esc(a.link)}" target="_blank" rel="noopener noreferrer">${esc(a.label)}</a>` : a.cmd ? `<button class="btn sm cmdb" data-act="copy-t" data-t="${esc(a.cmd)}" title="Copy">${esc(a.cmd)}</button>` : `<span class="mono mut">${esc(a.text)}</span>`);
   if (adminUrl(name)) rows.push(`<div class="item"><span class="lbl0">Admin</span>${webBtn(name, 'Open admin page')}<span class="sub mono">${esc(adminUrl(name))}</span></div>`);
   /* addresses: its own ports, and network cards it has through adapters */
   const ifs = [];
@@ -2269,8 +2257,7 @@ function connectHtml(name) {
   for (const ms of IX.l2.byIface.values()) for (const m of ms) if (m.dev === name && refDev(m.iface) !== name && m.ip && !ifs.some(f => f.ref === m.iface)) { const P = IX.ports.get(m.iface); ifs.push({ label: refDev(m.iface), ref: m.iface, p: P ? P.p : { ip: m.ip } }); }
   for (const f of ifs) {
     const ms = IX.l2.byIface.get(f.ref) || [], u = ms.find(m => m.mode === 'untagged'), vlan = f.p.vlan || (u && u.vlan) || '', att = u && u.att;
-    const acts = serviceActions(f.p.ip, f.p.services);
-    rows.push(`<div class="item"><span class="lbl0 mono">${esc(f.label)}</span><b class="mono">${esc(f.p.ip)}</b>${vlan ? `<span class="chip">${esc(vlan)}</span>` : ''}${acts.map(act).join(' ')}<span class="sub">${att ? 'Switch port ' + esc(att) : ''}${f.p.mac ? (att ? ' · ' : '') + 'MAC <span class="mono">' + esc(f.p.mac) + '</span>' : ''}</span></div>`);
+    rows.push(`<div class="item"><span class="lbl0 mono">${esc(f.label)}</span><b class="mono">${esc(f.p.ip)}</b>${vlan ? `<span class="chip">${esc(vlan)}</span>` : ''}${f.p.services ? `<span class="mono">${esc(f.p.services)}</span>` : ''}<span class="sub">${att ? 'Switch port ' + esc(att) : ''}${f.p.mac ? (att ? ' · ' : '') + 'MAC <span class="mono">' + esc(f.p.mac) + '</span>' : ''}</span></div>`);
   }
   /* serial consoles and JTAG: where they end up (a server or a PC) */
   for (const p of d.ports) {
@@ -3040,7 +3027,6 @@ const ACT = {
   'toast-x': () => hideToast(),
   'dlg-close': () => closeDlg(true),
   'dlg-back': () => closeDlg(),
-  'copy-t': el => copyText(el.dataset.t, el),
   copy: el => { const src = $('#' + el.dataset.src); if (src) copyText(src.textContent, src); },
   'log-more': () => { UI.logN += 100; renderData(); },
   'err-close': el => { el.hidden = true; }

@@ -27,7 +27,7 @@ portTypes:
   rs422: { label: RS-422, layer: serial, name: "rs422-{n}", alias: [rs-422] }
   rs485: { label: RS-485, layer: serial, name: "rs485-{n}", alias: [rs-485] }
   uart: { label: UART TTL (3V3 or 5V), layer: serial, name: "uart{n}", first: 0, alias: [ttl, console] }
-  jtag: { label: JTAG or SWD, layer: jtag, name: jtag, alias: [swd, xvc] }
+  jtag: { label: JTAG or SWD, layer: jtag, name: jtag, alias: [swd] }
   usb: { label: USB, layer: usb, name: "usb{n}", alias: [usb-a, usb-b, usb-c, usb-otg, usb-host, usb-dev] }
   displayport: { label: DisplayPort, layer: video, name: "dp{n}", alias: [dp] }
   dvi: { label: DVI, layer: video, name: "dvi{n}", alias: [] }
