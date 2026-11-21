@@ -85,11 +85,16 @@ main{padding-block:12px 40px}
 .tab>*{min-width:0}
 
 /* summary and controls */
-.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
-.stat{background:var(--panel);border:1px solid var(--line2);border-radius:8px;padding:6px 8px;min-width:0}
-.stat b{display:block;font:600 17px var(--mono);font-variant-numeric:tabular-nums}
-.stat span{display:block;font-size:11px;color:var(--mut);line-height:1.2}
-@media (min-width:720px){.summary{grid-template-columns:repeat(6,1fr)}}
+.summary{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:13px;color:var(--mut);margin-bottom:8px}
+.stat b{font:700 14px var(--mono);color:var(--ink);font-variant-numeric:tabular-nums;margin-right:4px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex:none}
+.seg button{min-height:40px;padding:0 14px;border:0;background:var(--panel);font-weight:600;color:var(--mut)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--acc);color:var(--acc-ink)}
+.row.tools{flex-wrap:nowrap;align-items:flex-start}
+.row.tools #layers{flex:1;min-width:0}
+.tbtn{display:flex;gap:6px;flex:none}
+@media (max-width:719px){.row.tools{flex-wrap:wrap}.tbtn{width:100%}.summary{flex-wrap:nowrap;overflow-x:auto;white-space:nowrap;scrollbar-width:none;margin-inline:-16px;padding-inline:16px}.summary::-webkit-scrollbar{display:none}}
 .ctl{display:flex;flex-direction:column;gap:8px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .row>.grow{flex:1 1 150px;min-width:0}
@@ -137,6 +142,7 @@ svg.map .ln-power .v{stroke-dasharray:7 4}
 svg.map .ln-radio .v{stroke-dasharray:2 4;stroke-linecap:round}
 svg.map .lk.far .v{opacity:.45}
 svg.map.has-sel .lk:not(.hl){opacity:.1}
+svg.map.has-sel .dev.unrel{opacity:.35} svg.map.hov .lk:not(.hl2){opacity:.12} svg.map .lk.hl2 .v{opacity:1}
 svg.map .lk.hl .v{opacity:1}
 svg.map .lk.hl .v{stroke-width:3}
 svg.vmap .vh{fill:var(--panel2);stroke:var(--line)} svg.vmap .vhead{cursor:pointer}
@@ -149,6 +155,8 @@ svg.vmap .vdev.reach .vb{stroke:var(--ok);stroke-width:2} svg.vmap .vdev.routed 
 svg.vmap .vhead.voff{opacity:.35} svg.vmap .vhead.von .vh{stroke:var(--acc);stroke-width:2} svg.vmap .vhead.vrt .vh{stroke:var(--warn);stroke-dasharray:5 3} svg.vmap .vdev.dim{opacity:.25}
 svg.vmap .vn{fill:var(--ink);font-size:12.5px;font-weight:700} svg.vmap .vl{fill:var(--ink);font-size:10.5px} svg.vmap .vbad{fill:var(--acc);font-size:10px;font-weight:700}
 .vhelp{font-size:13px;margin:4px 0} .vhelp summary{cursor:pointer;color:var(--mut)} .vhelp ul{margin:6px 0;padding-left:18px} .vhelp li{margin:2px 0}
+svg.map .bun .bv{stroke-linecap:round} svg.map .bun .fan{stroke-width:1.3}
+svg.map .bnum{font:700 10px var(--sans);fill:var(--ink);stroke:var(--panel);stroke-width:3px;paint-order:stroke}
 svg.map .ltag rect{fill:var(--tag)} svg.map .ltag text{fill:var(--tag-ink);font-size:10px;font-weight:700}
 svg.map .ltag.nolab rect{fill:var(--panel);stroke:var(--mut);stroke-dasharray:2 2} svg.map .ltag.nolab text{fill:var(--mut);font-weight:400}
 .ln-net .v{stroke:var(--L-net)!important}.ln-power .v{stroke:var(--L-power)!important}.ln-serial .v{stroke:var(--L-serial)!important}
@@ -276,11 +284,20 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
     <div class="summary" id="summary"></div>
     <div class="ctl">
       <div class="row">
+        <div class="seg" id="views" role="group" aria-label="Map view"><button class="on" data-act="view" data-v="phys">Physical</button><button data-act="view" data-v="vlan">VLANs</button></div>
         <input class="grow" id="q" type="search" placeholder="Search: name, IP, MAC, serial" autocomplete="off" aria-label="Search the map">
         <select class="grow" id="f-proj" aria-label="Filter by project"></select>
       </div>
-      <div class="lays" id="views" role="group" aria-label="Map view"><button class="lay on" data-act="view" data-v="phys">Physical</button><button class="lay" data-act="view" data-v="vlan">VLANs</button></div>
-      <div class="lays" id="layers"></div>
+      <div class="row tools">
+        <div class="lays" id="layers"></div>
+        <span class="tbtn">
+          <button class="btn sm" data-act="zoom" data-z="-1" aria-label="Zoom out">−</button>
+          <button class="btn sm" data-act="zoom" data-z="1" aria-label="Zoom in">+</button>
+          <button class="btn sm" id="b-fit" data-act="fit">Fit width</button>
+          <button class="btn sm pri ed" data-act="add-dev">+ Device</button>
+          <button class="btn sm pri ed" data-act="add-link">+ Cable</button>
+        </span>
+      </div>
       <details class="vhelp" id="vhelp" hidden><summary>How to read the VLAN map</summary><ul>
         <li>Each column is a VLAN: one network. Devices in a column reach each other directly.</li>
         <li>A box across columns is in several VLANs: a router, or a server with sub-interfaces.</li>
@@ -292,13 +309,6 @@ pre.cmd{margin:6px 0;padding:8px 10px;background:var(--panel2);border:1px solid 
         <li><b>A + B</b>: two VLANs joined by an untagged cable (for example an IT access port on your switch's default VLAN). Each switch calls it by its own VLAN; it is one network.</li>
         <li>Tap a device: its VLANs stand out, green boxes are the devices it reaches, dashed ones what its gateway (GW) may route to, if its rules allow.</li>
       </ul></details>
-      <div class="row">
-        <button class="btn sm" data-act="zoom" data-z="-1" aria-label="Zoom out">−</button>
-        <button class="btn sm" data-act="zoom" data-z="1" aria-label="Zoom in">+</button>
-        <button class="btn sm" id="b-fit" data-act="fit">Fit width</button>
-        <button class="btn sm pri ed" data-act="add-dev">+ Device</button>
-        <button class="btn sm pri ed" data-act="add-link">+ Cable</button>
-      </div>
     </div>
     <div class="selbar" id="selbar"></div>
     <div class="mapwrap" id="mapwrap"><div id="map"></div></div>

@@ -84,12 +84,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const empty = await page.evaluate(() => ({ n: Object.keys(LAB.state.devices).length, hint: document.getElementById('map-hint').textContent, notice: document.getElementById('notice-t').textContent, compat: document.compatMode, tpl: Object.keys(LAB.state.catalog.templates).length }));
   ok(empty.n === 0 && /^No devices/.test(empty.hint) && /^Local mode/.test(empty.notice) && empty.compat === 'CSS1Compat' && empty.tpl === NT, 'starts empty, with the default catalog and a short local-mode notice', empty.notice);
   await loadExample(page);
-  const boot = await page.evaluate(() => ({ devs: document.querySelectorAll('svg.map .dev').length, links: document.querySelectorAll('svg.map .lk').length, n: Object.keys(LAB.state.devices).length, l: LAB.state.links.length,
+  const boot = await page.evaluate(() => ({ devs: document.querySelectorAll('svg.map .dev').length, links: [...document.querySelectorAll('svg.map .lk')].reduce((a, g) => a + (+g.dataset.n || 1), 0), bundles: document.querySelectorAll('svg.map .lk.bun').length, n: Object.keys(LAB.state.devices).length, l: LAB.state.links.length,
     err: !document.getElementById('err').hidden, scrollX: document.documentElement.scrollWidth > window.innerWidth + 1, issues: LAB.index.issues.map(i => i.level + ': ' + i.msg),
     col: Object.fromEntries(Object.keys(LAB.state.devices).map(n => [n, LAB.mapCol(n)])),
     x: Object.fromEntries([...document.querySelectorAll('svg.map .dev')].map(g => [g.dataset.dev, g.getBoundingClientRect().x])) }));
   ok(boot.devs === boot.n && boot.n >= 60 && boot.n <= 90, 'example drawn: ' + boot.devs + ' boxes for ' + boot.n + ' devices');
-  ok(boot.links === boot.l && boot.l > 150, boot.links + ' lines for ' + boot.l + ' cables');
+  ok(boot.links === boot.l && boot.l > 150, 'every cable drawn: ' + boot.l + ' cables (' + boot.bundles + ' groups of parallel cables drawn as one)');
   ok(!boot.err && !boot.scrollX, 'no error banner and no horizontal overflow at 390 px');
   console.log('  example issues:'); boot.issues.forEach(i => console.log('     ' + i));
   ok(boot.issues.length === 3 && boot.issues.some(i => /VLAN TEST-B is split/.test(i)), 'only the three intentional issues');
@@ -401,7 +401,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     LAB.ui.layers.net = false; LAB.ui.project = 'ALPHA';
     const svg = LAB.exportMapSvg(), doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
     const rep = LAB.reportHtml(), rd = new DOMParser().parseFromString(rep, 'text/html');
-    return { ok: !doc.querySelector('parsererror'), devs: doc.querySelectorAll('.dev').length, lks: doc.querySelectorAll('.lk').length, n: Object.keys(LAB.state.devices).length, l: LAB.state.links.length, vars: /var\(--/.test(svg), style: /<style>/.test(svg),
+    return { ok: !doc.querySelector('parsererror'), devs: doc.querySelectorAll('.dev').length, lks: [...doc.querySelectorAll('.lk')].reduce((a, g) => a + (+g.getAttribute('data-n') || 1), 0), n: Object.keys(LAB.state.devices).length, l: LAB.state.links.length, vars: /var\(--/.test(svg), style: /<style>/.test(svg),
       rsvg: rd.querySelectorAll('svg').length, rrows: [...rd.querySelectorAll('table')].map(t => t.tBodies[0].rows.length).join(), undo: (LAB.ui.layers.net = true, LAB.ui.project = '') };
   });
   ok(ex2.ok && ex2.devs === ex2.n && ex2.lks === ex2.l && !ex2.vars && ex2.style, 'Map SVG: valid, self-contained, the whole lab whatever the filters (' + ex2.devs + ' devices, ' + ex2.lks + ' cables)');
@@ -675,6 +675,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(await desk.evaluate(() => { const m = LAB.index.l2.vlans.HOME.members; return ['homeassistant', 'nas', 'garden-camera'].every(n => m.some(x => x.dev === n)) && m.find(x => x.dev === 'router').gw && m.every(x => !x.att || x.att.startsWith('router:')); }), 'home network: devices behind the router get its VLAN; the router is the gateway');
   ok(home.boxes === 10 && home.lines === 10 && home.down === 'homeassistant,router' && home.gw === 'fixed' && home.issues.length === 0, 'a home network written in YAML: 10 devices, 10 links, no issues; UPS off takes down router and Home Assistant', home.issues.join(' | '));
   await desk.screenshot({ path: path.join(SHOTS, 'home-1280.png') });
+  const bunY = ['devices:', '  dev-a:', '    types: [switch]', '    ports:'].concat([1, 2, 3, 4, 5, 6, 7, 8].map(i => `      - { name: p${i}, kind: rj45 }`))
+    .concat(['  dev-b:', '    types: [other]', '    ports:']).concat([1, 2, 3, 4, 5, 6, 7, 8].map(i => `      - { name: q${i}, kind: rj45 }`))
+    .concat(['  dev-c:', '    types: [other]', '    ports:', '      - { name: e1, kind: rj45 }', '  dev-d:', '    types: [other]', '    ports:', '      - { name: e1, kind: rj45 }',
+      'links:', '  - { id: N-001, type: net, a: "dev-a:p1", b: "dev-b:q1" }', '  - { id: N-002, type: net, a: "dev-a:p2", b: "dev-b:q2" }', '  - { id: N-003, type: net, a: "dev-a:p3", b: "dev-b:q3" }',
+      '  - { id: N-004, type: net, a: "dev-a:p5", b: "dev-b:q7" }', '  - { id: N-005, type: net, a: "dev-a:p6", b: "dev-b:q6" }',
+      '  - { id: N-006, type: net, a: "dev-a:p8", b: "dev-b:q5" }', '  - { id: N-007, type: net, a: "dev-a:p4", b: "dev-c:e1" }', '  - { id: N-008, type: net, a: "dev-a:p7", b: "dev-d:e1" }']).join('\n');
+  const bun = await desk.evaluate(y => {
+    const st = LAB.parseYaml(y); st.catalog = JSON.parse(JSON.stringify(LAB.state.catalog)); LAB.load(st); LAB.ui.view = 'phys'; LAB.ui.sel = null; LAB.ui.selLink = null; LAB.setTab('map');
+    const groups = [...document.querySelectorAll('svg.map .lk.bun')].map(g => g.dataset.id + 'x' + g.dataset.n).sort().join();
+    const g = document.querySelector('svg.map .lk.bun[data-id="N-001"]'); g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const sel = { bar: document.getElementById('selbar').textContent, hl: document.querySelector('svg.map .lk.bun[data-id="N-001"]').classList.contains('hl'), tag: [...document.querySelectorAll('svg.map .ltag text')].map(t => t.textContent).join() };
+    LAB.ui.selLink = null; LAB.ui.sel = 'dev-c'; LAB.refreshAll();
+    const unrel = [...document.querySelectorAll('svg.map .dev.unrel')].map(b => b.dataset.dev).sort().join();
+    LAB.ui.sel = null; LAB.refreshAll();
+    const d = [...document.querySelectorAll('svg.map .dev')].find(b => b.dataset.dev === 'dev-d'); d.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    const hov = { svg: document.querySelector('#map svg').classList.contains('hov'), hl: [...document.querySelectorAll('svg.map .lk.hl2')].map(l => l.dataset.id).join() };
+    return { groups, sel, unrel, hov };
+  }, bunY);
+  ok(bun.groups === 'N-001x3,N-004x2', 'parallel cables: p1-p3 to q1-q3 and p5-p6 to q7-q6 (reverse order) are drawn as one; p8 to q5 is not consecutive, so it stays on its own', bun.groups);
+  ok(/^3 cables\s*dev-a:p1…p3 ↔ dev-b:q1…q3/.test(bun.sel.bar) && bun.sel.hl && bun.sel.tag === 'N-001…N-003', 'tapping a group selects it: "3 cables dev-a:p1…p3 ↔ dev-b:q1…q3", with its ids', bun.sel.bar);
+  ok(bun.unrel === 'dev-b,dev-d', 'with a device selected, the boxes it is not connected to fade', bun.unrel);
+  ok(bun.hov.svg && bun.hov.hl === 'N-008', 'on a computer, the pointer over a device highlights its cables', JSON.stringify(bun.hov));
   await desk.evaluate(() => { LAB.ui.user = 'test'; });
   await desk.click('#b-edit');
   await desk.evaluate(() => LAB.setTab('data'));

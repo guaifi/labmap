@@ -5,7 +5,8 @@ IP addresses, on a map anyone on the network can open. One web page, one small P
 server, plain YAML files. Nothing to install besides Python 3.7+.
 
 - **Physical map**: power on one side, network on the other, devices and adapters in the
-  middle. In edit mode, tap a port and then another to connect them.
+  middle. Parallel cables between consecutive ports are drawn as one. In edit mode, tap
+  a port and then another to connect them.
 - **VLAN map**: one column per VLAN with its members, deduced from cables and switch
   ports. Tap a device to see the VLANs it is in and which devices it reaches.
 - **Device sheet**: ports, power chain, what goes down if an outlet is switched off,

@@ -146,6 +146,11 @@
    · Device sheet "Connect" (connectHtml): admin page, each address with its VLAN,
      switch port, MAC and services as written, and where its serial console and
      JTAG end up by the cables. Nothing is assumed about how to use a service.
+   · Parallel cables (one layer, consecutive ports of one device to consecutive ports
+     of another, same or reverse order) are drawn as one thick cable with "×N" and
+     fanned out at both ends (L.bundles). Selecting a device or cable fades the boxes
+     it is not connected to; on a computer the pointer over a device highlights its
+     cables. Each box has a colour stripe by role and each column a faint band.
    · Map taps: the first tap on a device or cable highlights it (selection bar
      with Open); a second tap, or Open, opens its sheet. In edit mode every
      physical port of a visible layer is on its box (free ones hollow): tap a
@@ -1508,7 +1513,7 @@ function renderTab() {
    --------------------------------------------------------------------------- */
 function renderMapTab() {
   const s = IX.stats;
-  const cell = (v, label) => `<div class="stat"><b>${v}</b><span>${label}</span></div>`;
+  const cell = (v, label) => `<span class="stat"><b>${v}</b>${label}</span>`;
   $('#summary').innerHTML = cell(s.devs, 'devices') + cell(s.links, 'cables') + cell(s.ports, 'ports') +
     cell(s.sw[0] + '/' + s.sw[1], 'free on switches') + cell(s.pdu[0] + '/' + s.pdu[1], 'free on PDUs') + cell(s.hub[0] + '/' + s.hub[1], 'free on USB hubs');
   const pj = projects();
@@ -1689,7 +1694,43 @@ function layout(gap) {
   let H = 60;
   for (const b of box.values()) H = Math.max(H, b.y + b.h + 16);
   const W = M.PADX * 2 + 5 * M.W + 4 * gap;
-  return { W, H, box, links, bands, colX };
+  /* bundles: cables of one layer from consecutive ports of one device to consecutive
+     ports of another (same or reverse order) are drawn as one thick cable */
+  const bundles = [];
+  {
+    const idx = (dn, pn) => S.devices[dn].ports.findIndex(p => p.name === pn), groups = new Map();
+    for (const k of links) {
+      const [an, ap] = splitRef(k.a), [bn, bp] = splitRef(k.b);
+      if (an === bn) continue;
+      const e = natCmp(an, bn) <= 0 ? { k, d1: an, p1: ap, d2: bn, p2: bp } : { k, d1: bn, p1: bp, d2: an, p2: ap };
+      e.i1 = idx(e.d1, e.p1); e.i2 = idx(e.d2, e.p2);
+      push(groups, e.d1 + '|' + e.d2 + '|' + k.type, e);
+    }
+    const make = run => {
+      const A = box.get(run[0].d1), B = box.get(run[0].d2), k0 = run[0].k, sa = sideFor(A, B, k0), sb = sideFor(B, A, k0);
+      const xa = sa > 0 ? A.x + M.W : A.x, xb = sb > 0 ? B.x + M.W : B.x, ya = run.map(e => A.rows.get(e.p1).y), yb = run.map(e => B.rows.get(e.p2).y);
+      const x1 = xa + sa * 14, y1 = Math.round(avg(ya)), x2 = xb + sb * 14, y2 = Math.round(avg(yb));
+      const dx = A.col === B.col ? 24 + Math.min(48, Math.abs(y2 - y1) * 0.1) : Math.max(28, Math.abs(x2 - x1) * 0.45), c1 = Math.round(x1 + sa * dx), c2 = Math.round(x2 + sb * dx);
+      const fan = (x, y, xe, ye, sd) => `M${x} ${y}C${x + sd * 8} ${y} ${xe - sd * 6} ${ye} ${xe} ${ye}`;
+      const bu = { links: run.map(e => e.k), n: run.length, type: k0.type, devs: [run[0].d1, run[0].d2], far: Math.abs(A.col - B.col) >= 3,
+        d: `M${x1} ${y1}C${c1} ${y1} ${c2} ${y2} ${x2} ${y2}`, bz: [x1, y1, c1, y1, c2, y2, x2, y2], fans: ya.map(y => fan(xa, y, x1, y1, sa)).concat(yb.map(y => fan(xb, y, x2, y2, sb))),
+        label: run[0].d1 + ':' + run[0].p1 + '…' + run[run.length - 1].p1 + ' ↔ ' + run[0].d2 + ':' + run[0].p2 + '…' + run[run.length - 1].p2 };
+      for (const e of run) e.k.bundle = bu;
+      bundles.push(bu);
+    };
+    for (const es of groups.values()) {
+      if (es.length < 2) continue;
+      es.sort((x, y) => x.i1 - y.i1);
+      let run = [es[0]], dir = 0;
+      for (let j = 1; j <= es.length; j++) {
+        const p = run[run.length - 1], c = es[j], d = c ? c.i2 - p.i2 : 0;
+        if (c && c.i1 === p.i1 + 1 && (d === 1 || d === -1) && (run.length === 1 || d === dir)) { if (run.length === 1) dir = d; run.push(c); continue; }
+        if (run.length >= 2) make(run);
+        run = c ? [c] : []; dir = 0;
+      }
+    }
+  }
+  return { W, H, box, links, bands, colX, bundles };
 }
 
 /* Cable id tags of the highlighted cables: tried along each curve (middle first) and put
@@ -1734,7 +1775,16 @@ function mapSvg(o) {
   MAP_COLS.forEach((t, i) => out.push(`<rect class="colbg cb-${i}" x="${L.colX(i) - 12}" y="0" width="${M.W + 24}" height="${L.H}" rx="8"/><text class="cap" x="${L.colX(i)}" y="15">${t}</text>`));      // one faint band per column
   for (const b of L.bands) out.push(`<rect class="band" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="6"/><text class="bandt" x="${b.x + 8}" y="${b.y + 15}">${esc(trunc(b.g || 'No project', 20))}</text>`);
   const tags = [];
+  /* with a device or cable selected, what it is not connected to fades */
+  const near = UI.sel && L.box.has(UI.sel) ? new Set([UI.sel].concat(...L.links.filter(k => k.devs.includes(UI.sel)).map(k => k.devs))) : UI.selLink ? new Set([].concat(...L.links.filter(k => k.id === UI.selLink || (k.bundle && k.bundle.links.some(x => x.id === UI.selLink))).map(k => k.devs))) : null;
+  for (const bu of L.bundles || []) {                              // a group of parallel cables: one thick line, fanned out at the ends
+    const hl = (UI.sel && bu.devs.includes(UI.sel)) || (UI.selLink && bu.links.some(k => k.id === UI.selLink)), dim = hits && !hits.has(bu.devs[0]) && !hits.has(bu.devs[1]);
+    const ids = bu.links[0].id + '…' + bu.links[bu.n - 1].id, w = Math.min(10, 2.5 + bu.n * 0.9), mid = [(bu.bz[0] + 3 * bu.bz[2] + 3 * bu.bz[4] + bu.bz[6]) / 8, (bu.bz[1] + 3 * bu.bz[3] + 3 * bu.bz[5] + bu.bz[7]) / 8];
+    out.push(`<g class="lk bun ln-${bu.type}${bu.far ? ' far' : ''}${hl ? ' hl' : ''}${dim ? ' dim' : ''}" data-act="cable" data-id="${esc(bu.links[0].id)}" data-d="${esc(bu.devs.join('|'))}" data-n="${bu.n}">${o.style ? `<title>${esc(bu.n + ' cables ' + ids + ': ' + bu.label)}</title>` : ''}<path class="v bv" d="${bu.d}" style="stroke-width:${w}"/>${bu.fans.map(f => `<path class="v fan" d="${f}"/>`).join('')}<path class="hit" d="${bu.d}"/>${hl ? '' : `<text class="bnum" x="${Math.round(mid[0])}" y="${Math.round(mid[1]) - w / 2 - 3}" text-anchor="middle">×${bu.n}</text>`}</g>`);
+    if (hl) tags.push({ id: ids, bz: bu.bz, l: { labeled: bu.links.every(k => k.l.labeled) } });
+  }
   for (const k of L.links) {
+    if (k.bundle) continue;
     const hl = (UI.sel && k.devs.includes(UI.sel)) || (UI.selLink && k.id === UI.selLink);
     const dim = hits && !hits.has(k.devs[0]) && !hits.has(k.devs[1]);
     out.push(`<g class="lk ln-${k.type}${k.far ? ' far' : ''}${hl ? ' hl' : ''}${dim ? ' dim' : ''}" data-act="cable" data-id="${esc(k.id)}" data-d="${esc(k.devs.join('|'))}">${o.style ? `<title>${esc(k.id + ': ' + k.a + ' ↔ ' + k.b)}</title>` : ''}<path class="v" d="${k.d}"/><path class="hit" d="${k.d}"/></g>`);
@@ -1742,7 +1792,7 @@ function mapSvg(o) {
   }
   for (const b of L.box.values()) {
     const d = b.d, t0 = d.types[0], ip = firstIp(d), iss = IX.issueDev.get(b.n);
-    const cls = ['dev', b.col === 0 || b.col === 4 ? 'infra' : '', b.col === 3 ? 'pass' : '', UI.sel === b.n ? 'sel' : '', hits ? (hits.has(b.n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
+    const cls = ['dev', b.col === 0 || b.col === 4 ? 'infra' : '', b.col === 3 ? 'pass' : '', UI.sel === b.n ? 'sel' : '', near && !near.has(b.n) ? 'unrel' : '', hits ? (hits.has(b.n) ? 'hitq' : 'dim') : ''].filter(Boolean).join(' ');
     out.push(`<g class="${cls}" data-act="dev" data-dev="${esc(b.n)}" data-col="${b.col}" data-map="1" transform="translate(${b.x} ${b.y})">${o.style ? `<title>${esc(b.n + ' · ' + d.types.map(typeLabel).join(', ') + (ip ? ' · ' + ip : ''))}</title>` : ''}<rect class="bx" width="${M.W}" height="${b.h}" rx="5"/>`);
     out.push(`<rect class="rb cb-${b.col}" width="${M.W}" height="4" rx="2"/><text class="nm" x="8" y="17">${esc(trunc(b.n, 20))}</text><text class="sb" x="8" y="30">${esc(trunc(((TYPES[t0] && TYPES[t0].tag) || t0) + (ip ? ' · ' + ip : ''), 27))}</text>`);
     if (iss) out.push(`<circle class="i-${iss}" cx="${M.W - 9}" cy="9" r="4"/>`);
@@ -1792,8 +1842,9 @@ function renderSelbar(L) {
     const n = UI.sel, d = S.devices[n], ls = L.links.filter(k => k.devs.includes(n));
     h = `<b class="mono">${esc(n)}</b><span class="mut">${L.byDev ? esc(reachText(n)) : esc(d.types.map(typeLabel).join(', ')) + ' · ' + plural(ls.length, 'cable')}</span>`;
   } else if (UI.selLink) {
-    const l = S.links.find(x => x.id === UI.selLink);
-    if (l) h = `<b class="mono">${esc(l.id)}</b><span class="mut mono">${esc(l.a)} ↔ ${esc(l.b)}</span>`;
+    const l = S.links.find(x => x.id === UI.selLink), k = L.links && L.links.find(x => x.id === UI.selLink), bu = k && k.bundle;
+    if (bu) h = `<b class="mono">${plural(bu.n, 'cable')}</b><span class="mut mono">${esc(bu.label)}</span>`;
+    else if (l) h = `<b class="mono">${esc(l.id)}</b><span class="mut mono">${esc(l.a)} ↔ ${esc(l.b)}</span>`;
   }
   bar.innerHTML = h ? h + '<span class="sp"></span><button class="btn sm pri" data-act="sel-open">Open</button><button class="btn sm" data-act="map-bg" aria-label="Clear selection">✕</button>'
     : `<span class="mut">${!IX.names.length ? '' : UI.view === 'vlan' ? 'Built from cables and switch ports. Tap a VLAN title for its IPs.' : NET.editing ? 'Tap a port, then another port, to connect them.' : 'Tap a device or cable to highlight it; tap again to open it.'}</span>`;
@@ -3035,7 +3086,16 @@ const ACT = {
 let deb = 0;
 const debounce = (fn, ms) => { clearTimeout(deb); deb = setTimeout(fn, ms || 180); };
 function wire() {
-  let rw = 0;
+  let rw = 0, hov = null;
+  document.addEventListener('mouseover', e => {                      // pointer over a device: its cables stand out (no selection needed)
+    const svg = $('#map svg.map:not(.vmap)');
+    if (!svg || svg.classList.contains('has-sel')) return;
+    const g = e.target.closest && e.target.closest('#map .dev'), n = g ? g.dataset.dev : null;
+    if (n === hov) return;
+    hov = n;
+    svg.classList.toggle('hov', !!n);
+    for (const l of svg.querySelectorAll('.lk')) l.classList.toggle('hl2', !!n && (l.dataset.d || '').split('|').includes(n));
+  });
   window.addEventListener('resize', () => { clearTimeout(rw); rw = setTimeout(() => { if (UI.tab === 'map') renderMap(); }, 250); });      // the map spreads to the new width
   document.addEventListener('click', e => {
     NET.lastAct = Date.now();
