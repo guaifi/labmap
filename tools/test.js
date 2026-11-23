@@ -76,6 +76,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     try { const st2 = L.normalize(L.readData(y)); if (L.toYaml(st2, true) !== y || !same(st, st2) || L.toCatalogYaml(L.normCatalog(L.readData(yc))) !== yc) { fz++; fzMsg = fzMsg || y; } } catch (e) { fz++; fzMsg = fzMsg || e.message; }
   }
   ok(fz === 0, 'YAML round trip of 300 labs and catalogs full of awkward text: nothing lost', fz ? fz + ' failed: ' + fzMsg.slice(0, 300) : '');
+  /* tools/lint.js: the page's checks without a browser, for files edited by hand */
+  const lint = (...a) => { try { return { code: 0, out: execFileSync('node', [path.join(ROOT, 'tools', 'lint.js')].concat(a), { stdio: ['ignore', 'pipe', 'pipe'] }).toString() }; } catch (e) { return { code: e.status, out: String(e.stdout || '') + String(e.stderr || '') }; } };
+  const ltmp = fs.mkdtempSync(path.join(os.tmpdir(), 'labmap-lint-'));
+  const docEx = (fs.readFileSync(path.join(ROOT, 'docs', 'data-format.md'), 'utf8').match(/```yaml\n([\s\S]*?)```/) || [])[1] || '';
+  fs.writeFileSync(path.join(ltmp, 'fx.yaml'), FX); fs.writeFileSync(path.join(ltmp, 'doc.yaml'), docEx); fs.writeFileSync(path.join(ltmp, 'cat.yaml'), catTxt);
+  fs.writeFileSync(path.join(ltmp, 'messy.yaml'), 'devices:\n  b:\n    types: [board]\n    ports:\n      - { name: eth0, kind: ethernet }\n  a:\n    types: [pc]\n    ports:\n      - { name: eth0, kind: RJ45 }\nlinks:\n  - { id: N-001, type: net, a: "a:eth0", b: "b:eth0" }\n  - { id: N-002, type: net, a: "a:eth9", b: "b:eth0" }\n');
+  const lt1 = lint(path.join(ltmp, 'fx.yaml')), lt2 = lint(path.join(ltmp, 'doc.yaml'), path.join(ltmp, 'cat.yaml')), lt3 = lint(path.join(ltmp, 'messy.yaml'), '--write'), lt4 = lint(path.join(ltmp, 'cat.yaml'));
+  const messy = fs.readFileSync(path.join(ltmp, 'messy.yaml'), 'utf8');
+  ok(lt1.code === 1 && (lt1.out.match(/^(ERROR|warning) /gm) || []).length === 3 && lt2.code === 0 && /No issues/.test(lt2.out), 'tools/lint.js: the test lab gives its 3 intentional issues; the example in docs/data-format.md is clean', lt2.out.split('\n')[0]);
+  ok(lt3.code === 1 && /port a:eth9 does not exist/.test(lt3.out) && /^format: 1$/m.test(messy) && messy.indexOf('  a:') < messy.indexOf('  b:') && /kind: rj45/.test(messy) && !/ethernet|RJ45/.test(messy) && fs.existsSync(path.join(ltmp, 'messy.yaml.bak')) && lt4.code === 2, 'with --write it rewrites a messy file the way the page does (sorted, aliases to catalog keys, .bak kept); a non-lab file is refused');
+  fs.rmSync(ltmp, { recursive: true, force: true });
   let yerr = ''; try { L.parseYaml('a:\n  b: 1\n   c: 2'); } catch (e) { yerr = e.message; }
   ok(/line 3/.test(yerr), 'badly indented YAML reports the line number', yerr);
 

@@ -246,7 +246,7 @@
    · Undo covers the last change of this tab only.
    ============================================================================ */
 'use strict';
-const VERSION = '0.9.1';
+const VERSION = '0.10.0';
 
 /* ---------------------------------------------------------------------------
    1. Utilities
@@ -3172,7 +3172,9 @@ const API = {
   layerOf, powerDir, isNetKind, kindKey, mapCol, mapCrossings, exportVlanSvg, vlanLayout, reachOf, exportMapSvg, reportHtml, labelsCsv, routesFrom, routeText, chainsUp, cascade, switchesOf, upLinks, pairedIn, validate: () => IX.issues, ipInfo, freeIp, parsePorts, portsToText, suggestPorts, genNames, nextCableId,
   FORMAT, toYaml, toCatalogYaml, parseYaml, readData, normCatalog, normalize, setCatalog0: c => { CATALOG0 = normCatalog(c); }, ipToInt, intToIp, commit, enterEdit, leaveEdit, setTab, refreshAll, replaceState,
   /* load a lab without edit mode or saving (tests and console) */
-  load: st => { st.catalog = st.catalog || clone(S.catalog); S = normalize(st); UNDO = null; refreshAll(); }
+  load: st => { st.catalog = st.catalog || clone(S.catalog); S = normalize(st); UNDO = null; refreshAll(); },
+  /* without a page (tools/lint.js): normalise a lab, index it and return the index */
+  analyze: st => { S = normalize(st); reindex(); return IX; }
 };
 if (typeof window !== 'undefined') { window.LAB = API; boot(); }
 if (typeof module !== 'undefined' && module.exports) module.exports = API;

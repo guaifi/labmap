@@ -25,14 +25,14 @@ No passwords and no HTTPS: for a trusted internal network only.
 On any computer with Python 3 (Linux, macOS, Windows):
 
 ```bash
-git clone --branch v0.9.1 --depth 1 https://github.com/guaifi/labmap.git
+git clone --branch v0.10.0 --depth 1 https://github.com/guaifi/labmap.git
 ```
 
 ```bash
 python3 labmap/server.py --port 8080
 ```
 
-Without Git, download `labmap-0.9.1.tar.gz` (or `.zip`) from the
+Without Git, download `labmap-0.10.0.tar.gz` (or `.zip`) from the
 [releases](https://github.com/guaifi/labmap/releases) page and extract it. On Windows
 the command is `py labmap\server.py --port 8080`; on a Mac, `xcode-select --install`
 gives you `python3`.
@@ -49,13 +49,13 @@ It starts with the computer and restarts if it stops. Code in `/opt/labmap`, dat
 **1. Code.** With Internet access:
 
 ```bash
-sudo git clone --branch v0.9.1 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
+sudo git clone --branch v0.10.0 --depth 1 https://github.com/guaifi/labmap.git /opt/labmap
 ```
 
-Without it, copy `labmap-0.9.1.tar.gz` to `/tmp` (USB stick, `scp`) and:
+Without it, copy `labmap-0.10.0.tar.gz` to `/tmp` (USB stick, `scp`) and:
 
 ```bash
-sudo mkdir -p /opt/labmap && sudo tar xzf /tmp/labmap-0.9.1.tar.gz --strip-components=1 -C /opt/labmap
+sudo mkdir -p /opt/labmap && sudo tar xzf /tmp/labmap-0.10.0.tar.gz --strip-components=1 -C /opt/labmap
 ```
 
 **2. A user for the server and a folder for the data:**
@@ -104,7 +104,7 @@ use is shown next to the title. First say which version you want (the latest is 
 [releases](https://github.com/guaifi/labmap/releases) page; an older one to go back):
 
 ```bash
-V=v0.9.1
+V=v0.10.0
 ```
 
 With Git:
@@ -113,7 +113,7 @@ With Git:
 cd /opt/labmap && sudo git fetch --depth 1 origin tag $V && sudo git checkout $V && sudo systemctl restart labmap
 ```
 
-Without Internet access, copy `labmap-0.9.1.tar.gz` (that version) to `/tmp` and:
+Without Internet access, copy `labmap-0.10.0.tar.gz` (that version) to `/tmp` and:
 
 ```bash
 sudo systemctl stop labmap && sudo rm -rf /opt/labmap && sudo mkdir /opt/labmap && sudo tar xzf /tmp/labmap-${V#v}.tar.gz --strip-components=1 -C /opt/labmap && sudo systemctl start labmap
@@ -140,6 +140,9 @@ rsync -a /var/lib/labmap/ /mnt/backup/labmap/
 
 - The files are standard YAML (`format: 1`). Newer versions read older data; an older
   version opens newer data read-only and never writes over it.
+- To load a lot of data at once, edit an exported `lab.yaml` and check it with
+  `node tools/lint.js lab.yaml catalog.yaml` before importing it. The format is described
+  in [docs/data-format.md](docs/data-format.md).
 
 ## Sites
 
